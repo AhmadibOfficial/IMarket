@@ -1,59 +1,23 @@
 'use client';
-import {useEffect,useMemo,useState} from 'react';
-
-type Product = {id:string;slug:string;name:string;category:string;description:string;price_kobo:number;group_price_kobo:number;stock_demo:number};
-type Campaign={id:string;product_id:string;product_name?:string;min_members:number;max_members:number;members:number;state:string;expires_at:string};
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
-const fmt=(kobo:number)=>new Intl.NumberFormat('en-NG',{style:'currency',currency:'NGN',maximumFractionDigits:0}).format(kobo/100);
-const categoryEmoji=(s:string)=>s==='Electronics'?'🔋':s==='Groceries'?'🌾':'🧵';
-export default function Storefront(){
- const [products,setProducts]=useState<Product[]>([]);
- const [groups,setGroups]=useState<Campaign[]>([]);
- const [message,setMessage]=useState('Connect the local API to load the demo catalog.');
- const [alias,setAlias]=useState('tester01');
- const [busy,setBusy]=useState(false);
- const [filter,setFilter]=useState('All');
- const [search,setSearch]=useState('');
- const categories=['All','Electronics','Groceries','Home & Business'];
- async function refresh(){
-  try{
-   const [pr,gr]=await Promise.all([fetch(`${API}/api/products`,{cache:'no-store'}),fetch(`${API}/api/groups`,{cache:'no-store'})]);
-   if(!pr.ok||!gr.ok) throw new Error('API unavailable');
-   setProducts(await pr.json()); setGroups(await gr.json());
-   setMessage('Connected to local demo API. All prices are sample values.');
-  }catch{setMessage('Offline preview: Start the local API and database to access demo products and group deals.');}
- }
- useEffect(()=>{void refresh()},[]);
- const shown=useMemo(()=>products.filter(p=>(filter==='All'||p.category===filter)&&`${p.name} ${p.category}`.toLowerCase().includes(search.toLowerCase())),[products,filter,search]);
- async function act(path:string, body:Record<string,unknown>){
-  setBusy(true);
-  try{
-   const r=await fetch(`${API}${path}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-   const data=await r.json();
-   if(!r.ok) throw new Error(typeof data.message==='string'?data.message:'Demo operation rejected');
-   setMessage(path.includes('checkout')?`Demo order ${data.id.slice(0,8)} created. No payment taken.`:path.endsWith('/join')?`Joined demo group. State: ${data.state}`:`Demo team created: ${data.id.slice(0,8)}. Join it below.`);
-   await refreshGroups();
-  }catch(e){setMessage(e instanceof Error?e.message:'Demo API error')}finally{setBusy(false)}
- }
- async function refreshGroups(){try{const r=await fetch(`${API}/api/groups`,{cache:'no-store'});if(r.ok)setGroups(await r.json())}catch{}}
- return <>
-  <div className="top-notice">🚧 IMK-001 LOCAL DEMO — No real orders, payments, lending, discounts or verified sellers</div>
-  <header className="nav shell"><a href="/" className="brand"><span className="brandmark">i</span><span>Market<small>SHOP SMARTER, TOGETHER</small></span></a>
-   <nav><a href="#shop">Explore</a><a href="#teams">Group deals</a><a href="/merchant">Sell on IMarket</a><a href="/admin">Operations</a></nav>
-   <a href="#shop" className="button small">Browse products ↗</a>
-  </header>
-  <main>
-   <section className="hero"><div className="shell hero-layout"><div className="hero-copy"><div className="eyebrow">THE FUTURE OF COMMUNITY COMMERCE · NIGERIA FIRST</div><h1>Shop better.<br/><em>Save together.</em></h1><p>Discover useful products, start a shopping team, and explore what transparent group discounts could look like. Designed for local communities and merchants.</p><div className="actions"><a href="#shop" className="button primary">Explore the marketplace →</a><a href="#teams" className="button outline">How group buying works</a></div><div className="hero-stats"><span>01 <small>Find products</small></span><span>02 <small>Form a team</small></span><span>03 <small>Unlock offers*</small></span></div></div>
-   <div className="hero-art"><span className="float float-top">✨ Shopping works better together</span><div className="deal-card"><div className="deal-icon">🛍️</div><div className="deal-caption">GROUP SHOPPING · CONCEPT</div><h3>A better deal starts with a team.</h3><p>Choose a product, invite your community, and reach the seller&apos;s group threshold.</p><div className="progress"><div/></div><span className="deal-meta">GROUP MILESTONE EXAMPLE</span></div><span className="float float-bottom">✔ Transparent prices &amp; thresholds</span></div></div></section>
-   <section className="advantages shell"><div><strong>✓ Seller-funded discounts</strong><span>No invented savings claims</span></div><div><strong>✓ Clear group progress</strong><span>Threshold and expiry visible</span></div><div><strong>✓ Built for trust</strong><span>Compliance before finance</span></div></section>
-   <section className="shell section" id="shop"><div className="section-heading"><div><span className="eyebrow dark">DISCOVER THE MARKETPLACE</span><h2>Products worth sharing</h2><p>Sample items for feature testing — not real offers or current stock.</p></div><span className="pill">● DEMO CATALOG</span></div><div className="toolbar"><div className="filters">{categories.map(c=><button key={c} className={filter===c?'selected':''} onClick={()=>setFilter(c)}>{c}</button>)}</div><input aria-label="Search products" placeholder="Search products…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
-   {shown.length?<div className="products">{shown.map(p=><article className="product" key={p.id}><div className="product-image"><span>{categoryEmoji(p.category)}</span><b>DEMO ITEM</b></div><div className="product-info"><span className="cat">{p.category}</span><h3>{p.name}</h3><p>{p.description}</p><div className="price-row"><div><small>Single price</small><strong>{fmt(p.price_kobo)}</strong></div><div className="group-price"><small>Team price*</small><strong>{fmt(p.group_price_kobo)}</strong></div></div><div className="card-actions"><button disabled={busy} onClick={()=>void act('/api/groups',{productId:p.id,minMembers:2,maxMembers:5,durationHours:24})}>Start demo team ↗</button><button disabled={busy} className="secondary" onClick={()=>void act('/api/demo-checkout',{productId:p.id,quantity:1})}>Simulate order</button></div></div></article>)}</div>:<div className="empty">No demo products found. {products.length===0?'Start the API and PostgreSQL service to load product data.':'Try another search.'}</div>}
-   </section>
-   <section className="team-section" id="teams"><div className="shell"><div className="section-heading"><div><span className="eyebrow dark">SOCIAL COMMERCE DEMO</span><h2>Buying power, together.</h2><p>Start a team above, then join a group with a synthetic demo alias.</p></div></div><div className="joinpanel"><div><label htmlFor="demoalias">Demo alias (no real name/email)</label><input id="demoalias" value={alias} maxLength={32} onChange={e=>setAlias(e.target.value)}/></div><p>Aliases must contain 3–32 letters, numbers, underscores or hyphens. Only synthetic test data.</p></div>
-   <div className="group-grid">{groups.length?groups.map(g=><article key={g.id} className="group-card"><span className="pill">{g.state.toUpperCase()}</span><h3>{g.product_name}</h3><p>{g.members} / {g.min_members} minimum shoppers · Max {g.max_members}</p><div className="progress"><div style={{width:`${Math.min(100,g.members/g.min_members*100)}%`}}/></div><small>Expires {new Date(g.expires_at).toLocaleString()}</small><button disabled={busy||g.state==='expired'||g.state==='full'} onClick={()=>void act(`/api/groups/${g.id}/join`,{demoAlias:alias})}>Join demo group →</button></article>):<div className="empty">No demo groups yet. Start a group from a product card to see it here.</div>}</div>
-   </div></section>
-   <section className="shell next-phase"><span className="eyebrow dark">WHAT COMES NEXT</span><h2>Flexible payments, built responsibly.</h2><p>Structured prepayments and regulated early-delivery installments are future features. They are not enabled, and no financing eligibility or legal approval is implied.</p><a className="button outline dark-outline" href="/merchant">Preview seller workspace →</a></section>
-  </main><footer className="footer"><div className="shell"><b>iMarket</b><span>Engineering prototype · IMK-001 · No live purchases or financial services.</span></div></footer>
-  <div role="status" aria-live="polite" className="demo-status">{message}</div>
- </>;
+import {useEffect,useState} from 'react';
+const API=process.env.NEXT_PUBLIC_API_URL||'http://127.0.0.1:4000';
+type Product={id:string;name:string;description:string;price_kobo:number;stock_demo:number;published:boolean};
+type Order={id:string;name:string;quantity:number;total_kobo:number;lifecycle:string};
+export default function Storefront({merchant=false}:{merchant?:boolean}) {
+ const [token,setToken]=useState(''),[alias,setAlias]=useState(''),[password,setPassword]=useState('');
+ const [products,setProducts]=useState<Product[]>([]),[orders,setOrders]=useState<Order[]>([]),[cart,setCart]=useState<Record<string,number>>({});
+ const [message,setMessage]=useState('Synthetic local shopping only. No payment is collected.'),[busy,setBusy]=useState(false),[key,setKey]=useState('');
+ const [name,setName]=useState(''),[description,setDescription]=useState(''),[price,setPrice]=useState('10000'),[stock,setStock]=useState('5');
+ async function api(path:string,body?:unknown,session=token){const r=await fetch(`${API}${path}`,{method:body===undefined?'GET':'POST',cache:'no-store',headers:{'content-type':'application/json',...(session?{authorization:`Bearer ${session}`}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});const data=await r.json();if(!r.ok)throw Object.assign(Error(typeof data.message==='string'?data.message:'Request rejected'),{status:r.status});return data;}
+ async function refresh(session=token){setProducts(await api(merchant?'/api/merchant/products':'/api/products',undefined,session));if(session)setOrders(await api('/api/orders',undefined,session));}
+ useEffect(()=>{if(!merchant)void refresh().catch(e=>setMessage(e.message));},[]);
+ async function run(work:()=>Promise<void>){setBusy(true);try{await work();}catch(e){setMessage(e instanceof Error?e.message:'API unavailable');}finally{setBusy(false);}}
+ return <main className="shell" style={{padding:'40px 20px'}}><nav><a href="/">Shop</a> · <a href="/merchant">Merchant workspace</a></nav><h1>{merchant?'Merchant workspace':'IMarket local shop'}</h1><p>No live purchases, payments or delivery. Use synthetic accounts provisioned with the local account tool.</p>
+ <p role="status">{message}</p>
+ {!token?<form onSubmit={e=>{e.preventDefault();void run(async()=>{const s=await api('/api/auth/login',{alias,password});setPassword('');setToken(s.accessToken);await refresh(s.accessToken);setMessage('Logged in for this tab. Session expires after 15 minutes.');});}}><label>Synthetic alias <input required value={alias} onChange={e=>setAlias(e.target.value)}/></label><label>Password <input required type="password" value={password} onChange={e=>setPassword(e.target.value)}/></label><button disabled={busy}>Log in</button></form>:<button disabled={busy} onClick={()=>void run(async()=>{try{await api('/api/auth/logout',{});}finally{setToken('');setOrders([]);setCart({});setKey('');if(merchant)setProducts([]);}})}>Log out</button>}
+ {merchant&&token&&<form onSubmit={e=>{e.preventDefault();void run(async()=>{await api('/api/merchant/products',{name,category:'Local demo',description,priceKobo:Number(price),stock:Number(stock)});await refresh();setMessage('Draft created. Publish it to make it available.');});}}><h2>Create product</h2><label>Name <input required maxLength={500} value={name} onChange={e=>setName(e.target.value)}/></label><label>Description <input required maxLength={500} value={description} onChange={e=>setDescription(e.target.value)}/></label><label>Price (kobo) <input type="number" min="1" max="1000000000" required value={price} onChange={e=>setPrice(e.target.value)}/></label><label>Synthetic stock <input type="number" min="0" max="1000000" required value={stock} onChange={e=>setStock(e.target.value)}/></label><button disabled={busy}>Create draft</button></form>}
+ <h2>{merchant?'Your products':'Available products'}</h2><div className="products">{products.map(p=><article className="product" style={{padding:20}} key={p.id}><h3>{p.name}</h3><p>{p.description}</p><p>₦{(Number(p.price_kobo)/100).toFixed(2)} · {p.stock_demo} available</p>{merchant?<button disabled={busy} onClick={()=>void run(async()=>{await api(`/api/merchant/products/${p.id}/publish`,{published:!p.published});await refresh();})}>{p.published?'Unpublish':'Publish'}</button>:<button disabled={busy||!!key||(cart[p.id]||0)>=Math.min(10,p.stock_demo)} onClick={()=>setCart({...cart,[p.id]:(cart[p.id]||0)+1})}>Add to cart</button>}</article>)}</div>
+ {!merchant&&<section><h2>Cart</h2>{Object.entries(cart).map(([id,q])=><p key={id}>{products.find(p=>p.id===id)?.name||id} × {q} <button disabled={busy||!!key} onClick={()=>{const next={...cart};delete next[id];setCart(next);}}>Remove</button></p>)}<p>Final prices and stock are checked by the server. Checkout reserves every item together.</p><button disabled={busy||!token||!Object.keys(cart).length} onClick={()=>void run(async()=>{const retryKey=key||crypto.randomUUID();setKey(retryKey);let result;try{result=await api('/api/cart-checkout',{items:Object.entries(cart).map(([productId,quantity])=>({productId,quantity})),idempotencyKey:retryKey});}catch(e){if([400,409].includes((e as {status?:number}).status||0))setKey('');throw e;}setCart({});setKey('');setMessage(`Simulated checkout created ${result.orderIds.length} order(s). No payment taken.`);await refresh();})}>Simulate checkout / retry</button>{key&&<p>Cart locked for safe retries. Retry the same checkout after a connection failure. <button disabled={busy} onClick={()=>void run(async()=>{await refresh();setMessage('Review your orders before starting a different checkout.');})}>Refresh order status</button></p>}</section>}
+ {token&&<section><h2>{merchant?'Orders to fulfill':'Your orders'}</h2><button disabled={busy} onClick={()=>void run(()=>refresh())}>Refresh</button>{orders.map(o=><article key={o.id}><p>{o.name} × {o.quantity} · ₦{(Number(o.total_kobo)/100).toFixed(2)} · {o.lifecycle} · {o.id}</p>{!merchant&&o.lifecycle==='reserved'&&<button disabled={busy} onClick={()=>void run(async()=>{await api(`/api/demo-orders/${o.id}/cancel`,{});await refresh();})}>Cancel and release stock</button>}{merchant&&['reserved','processing','shipped'].includes(o.lifecycle)&&<button disabled={busy} onClick={()=>void run(async()=>{await api(`/api/merchant/orders/${o.id}/fulfill`,{lifecycle:({reserved:'processing',processing:'shipped',shipped:'delivered'} as Record<string,string>)[o.lifecycle]});await refresh();})}>Advance simulated fulfillment</button>}</article>)}</section>}
+ </main>;
 }

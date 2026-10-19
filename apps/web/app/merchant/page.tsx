@@ -1,2 +1,3 @@
-import Link from 'next/link';
-export default function Merchant(){return <div className="shell" style={{paddingTop:65,paddingBottom:90}}><Link href="/" style={{color:'#245af0'}}>← Back to IMarket</Link><div className="eyebrow dark" style={{marginTop:65}}>MERCHANT CONSOLE · DESIGN SCAFFOLD</div><h1 style={{fontSize:55,letterSpacing:-2,margin:'14px 0'}}>Grow your business with teams.</h1><p style={{maxWidth:650,lineHeight:1.8,color:'#66768a'}}>Merchants will manage verified listings, inventory-backed group discounts, fulfilment and customer support in a secure workspace. This screen is a preview: seller authentication, dashboards and payouts are not implemented.</p><div className="advantages" style={{marginTop:40}}><div><strong>01 Product management</strong><span>Planned: create and approve product listings</span></div><div><strong>02 Group campaigns</strong><span>Planned: define transparent price thresholds</span></div><div><strong>03 Order operations</strong><span>Planned: track verified orders and disputes</span></div></div></div>}
+'use client';
+import Storefront from '../page';
+export default function Merchant(){return <Storefront merchant/>;}

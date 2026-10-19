@@ -15,8 +15,10 @@
     "dev:web": "npm run dev -w @imarket/web",
     "db:migrate": "npm run db:migrate -w @imarket/api",
     "build": "npm run build -w @imarket/api && npm run build -w @imarket/web",
-    "ci": "npm run check:offline && npm run test -w @imarket/api && npm run build",
-    "next-task": "python3 scripts/next_task.py"
+    "ci": "npm run validate:milestone",
+    "next-task": "python3 scripts/next_task.py",
+    "validate:milestone": "node scripts/validate-milestone.cjs",
+    "repair:milestone": "node scripts/repair-milestone.cjs"
   },
   "engines": {
     "node": ">=22"

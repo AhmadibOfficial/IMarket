@@ -21,7 +21,7 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     await admin.query(`CREATE SCHEMA ${schema}`);
     created=true;
     pool=new Pool({connectionString:process.env.IMARKET_TEST_DATABASE_URL,options:`-c search_path=${schema}`,max:12,connectionTimeoutMillis:2000});
-    for(let pass=0;pass<2;pass++) for(const file of ['001_init.sql','002_auth.sql']) await pool.query(readFileSync(`${__dirname}/../migrations/${file}`,'utf8'));
+    for(let pass=0;pass<2;pass++) for(const file of ['001_init.sql','002_auth.sql','003_inventory.sql','004_shopping.sql']) await pool.query(readFileSync(`${__dirname}/../migrations/${file}`,'utf8'));
     const tenants=await pool.query("INSERT INTO merchants(alias) VALUES('demo_tenant_a'),('demo_tenant_b') RETURNING id");
     const [a,b]=tenants.rows.map(x=>x.id);
     const product=(await pool.query('SELECT id FROM products LIMIT 1')).rows[0].id;
@@ -88,6 +88,143 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     assertSettledHttp(results.filter(x=>x.status==='rejected'),{429:15},'parallel limit rejections');
     await pool.query("UPDATE auth_limits SET resets_at=now()-interval '1 second'");
     await auth.limit('parallel-key',5);
+    // IMK-003: real PostgreSQL contention through independent controllers/connections.
+    const api2=new ApiController({pool});
+    await pool.query('UPDATE products SET stock_demo=3 WHERE id=$1',[product]);
+    const orderInput={productId:product,quantity:1,idempotencyKey:'same-order-key'};
+    const retries=await Promise.all(Array.from({length:16},(_,i)=>(i%2?api:api2).checkout(orderInput,req)));
+    assert.equal(new Set(retries.map(x=>x.id)).size,1);
+    assert(retries.every(x=>x.paymentCaptured===false && x.fulfilmentCreated===false && x.lifecycle==='reserved'));
+    const stock=async()=> (await pool.query('SELECT stock_demo FROM products WHERE id=$1',[product])).rows[0].stock_demo;
+    assert.equal(await stock(),2);
+    await assert.rejects(api.checkout({...orderInput,quantity:2},req),e=>e.getStatus()===409);
+    assert.equal(await stock(),2);
+    const orders=await Promise.allSettled(Array.from({length:8},(_,i)=>(i%2?api:api2).checkout({...orderInput,idempotencyKey:`different-key-${i}`},req)));
+    assert.equal(orders.filter(x=>x.status==='fulfilled').length,2);
+    assertSettledHttp(orders.filter(x=>x.status==='rejected'),{409:6},'inventory exhaustion');
+    assert.equal(await stock(),0);
+    const otherAccount=(await pool.query("INSERT INTO accounts(alias,password_hash,role) VALUES('demo_other_buyer',$1,'buyer') RETURNING id",[hash])).rows[0].id;
+    const otherReq={principal:{id:otherAccount,role:'buyer',merchant_id:null}};
+    await assert.rejects(api.cancelOrder(retries[0].id,{},otherReq),e=>e.getStatus()===400);
+    await Promise.all(Array.from({length:8},()=>api.cancelOrder(retries[0].id,{},req)));
+    assert.equal(await stock(),1);
+    assert.equal((await api.checkout(orderInput,req)).lifecycle,'cancelled');
+    assert.equal(await stock(),1);
+    const independent=await api.checkout(orderInput,otherReq);
+    assert.notEqual(independent.id,retries[0].id);
+    assert.equal(await stock(),0);
+    await api.cancelOrder(independent.id,{},otherReq);
+    const merchantReq={principal:{id:randomUUID(),role:'merchant',merchant_id:a}};
+    const wrongMerchant={principal:{id:randomUUID(),role:'merchant',merchant_id:b}};
+    const makeGroup=async()=> (await api.create(input,merchantReq)).id;
+    const group=await makeGroup();
+    await assert.rejects(api.expireGroup(group,{},merchantReq),e=>e.getStatus()===409);
+    await assert.rejects(api.cancelGroup(group,{},wrongMerchant),e=>e.getStatus()===400);
+    // Checkout and a group join compete for the final unit.
+    const race=await Promise.allSettled([api.join(group,{demoAlias:'demo_race'},req),api2.checkout({...orderInput,idempotencyKey:'race-checkout'},req)]);
+    assert.equal(race.filter(x=>x.status==='fulfilled').length,1);
+    assertSettledHttp(race.filter(x=>x.status==='rejected'),{409:1},'join versus checkout');
+    assert.equal(await stock(),0);
+    await api.cancelGroup(group,{},merchantReq);
+    if(race[1].status==='fulfilled') await api.cancelOrder(race[1].value.id,{},req);
+    assert.equal(await stock(),1);
+    // Duplicate membership must roll back its stock reservation.
+    const failed=await makeGroup();
+    await pool.query('UPDATE products SET stock_demo=5 WHERE id=$1',[product]);
+    await api.join(failed,{demoAlias:'demo_member'},req);
+    await assert.rejects(api.join(failed,{demoAlias:'demo_duplicate'},req),e=>e.getStatus()===409);
+    assert.equal(await stock(),4);
+    await pool.query("UPDATE campaigns SET expires_at=now()-interval '1 second' WHERE id=$1",[failed]);
+    const expirations=await Promise.all(Array.from({length:8},()=>api.expireGroup(failed,{},merchantReq)));
+    assert(expirations.every(x=>x.state==='expired'));
+    assert.equal(await stock(),5);
+    await assert.rejects(api.join(failed,{demoAlias:'demo_closed'},otherReq),e=>e.getStatus()===409);
+    const cancelled=await makeGroup();
+    await api.join(cancelled,{demoAlias:'demo_cancel'},req);
+    await Promise.all(Array.from({length:8},()=>api.cancelGroup(cancelled,{},merchantReq)));
+    assert.equal(await stock(),5);
+    await assert.rejects(api.join(cancelled,{demoAlias:'demo_closed'},otherReq),e=>e.getStatus()===409);
+    const confirmed=await makeGroup();
+    await api.join(confirmed,{demoAlias:'demo_confirm_a'},req);
+    await api.join(confirmed,{demoAlias:'demo_confirm_b'},otherReq);
+    await pool.query("UPDATE campaigns SET expires_at=now()-interval '1 second' WHERE id=$1",[confirmed]);
+    assert.equal((await api.expireGroup(confirmed,{},merchantReq)).state,'confirmed');
+    await assert.rejects(api.cancelGroup(confirmed,{},merchantReq),e=>e.getStatus()===409);
+    assert.equal(await stock(),3);
+    const lazy=await makeGroup();
+    await api.join(lazy,{demoAlias:'demo_lazy'},req);
+    await pool.query("UPDATE campaigns SET expires_at=now()-interval '1 second' WHERE id=$1",[lazy]);
+    await assert.rejects(api.join(lazy,{demoAlias:'demo_late'},otherReq),e=>e.getStatus()===409);
+    assert.equal((await pool.query('SELECT lifecycle FROM campaigns WHERE id=$1',[lazy])).rows[0].lifecycle,'expired');
+    assert.equal(await stock(),3);
+    const capacity=await makeGroup();
+    await pool.query('UPDATE products SET stock_demo=10 WHERE id=$1',[product]);
+    const buyers=[];
+    for(let i=0;i<8;i++) {
+      const buyer=(await pool.query("INSERT INTO accounts(alias,password_hash,role) VALUES($1,$2,'buyer') RETURNING id",[`demo_capacity_${i}`,hash])).rows[0].id;
+      buyers.push({principal:{id:buyer,role:'buyer',merchant_id:null}});
+    }
+    const joins=await Promise.allSettled(buyers.map((buyer,i)=>(i%2?api:api2).join(capacity,{demoAlias:`demo_capacity_${i}`},buyer)));
+    assert.equal(joins.filter(x=>x.status==='fulfilled').length,4);
+    assertSettledHttp(joins.filter(x=>x.status==='rejected'),{409:4},'group capacity');
+    assert.equal(await stock(),6);
+    await api.cancelGroup(capacity,{},merchantReq);
+    assert.equal(await stock(),10);
+    // Full HTTP journey: real Nest guard, hashed sessions and PostgreSQL transactions.
+    const {NestFactory,APP_GUARD}=require('@nestjs/core');
+    const {Module}=require('@nestjs/common');
+    const {AuthController}=require('../dist/auth.controller');
+    const {AuthGuard}=require('../dist/auth.guard');
+    const {DbService}=require('../dist/db.service');
+    class JourneyModule {}
+    Module({controllers:[ApiController,AuthController],providers:[{provide:DbService,useValue:{pool}},AuthService,{provide:APP_GUARD,useClass:AuthGuard}]})(JourneyModule);
+    await pool.query("INSERT INTO accounts(alias,password_hash,role,merchant_id) VALUES('demo_journey_merchant',$1,'merchant',$2),('demo_journey_other',$1,'merchant',$3)",[hash,a,b]);
+    const app=await NestFactory.create(JourneyModule,{logger:false});
+    try {
+      await app.listen(0,'127.0.0.1');
+      const base=await app.getUrl();
+      async function http(path,body,token,status=200){
+        const r=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{'content-type':'application/json',...(token?{authorization:'Bearer '+token}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});
+        const result=await r.json();assert.equal(r.status,status,`Unexpected status for ${path}`);return result;
+      }
+      const login=async alias=>(await http('/api/auth/login',{alias,password},null,201)).accessToken;
+      const seller=await login('demo_journey_merchant'), stranger=await login('demo_journey_other'),buyer=await login('synthetic-buyer'),otherBuyer=await login('demo_other_buyer');
+      const listing={name:'Synthetic journey product',category:'Test',description:'Synthetic only',priceKobo:12345,stock:2};
+      await http('/api/merchant/products',listing,null,401);
+      await http('/api/merchant/products',listing,buyer,403);
+      await http('/api/merchant/products',{...listing,priceKobo:-1},seller,400);
+      const draft=await http('/api/merchant/products',listing,seller,201);
+      assert(!(await http('/api/products')).some(x=>x.id===draft.id));
+      await http('/api/merchant/products/'+draft.id+'/publish',{published:true},stranger,400);
+      await http('/api/merchant/products/'+draft.id+'/publish',{published:true},seller,201);
+      assert((await http('/api/products')).some(x=>x.id===draft.id));
+      const cart={items:[{productId:draft.id,quantity:1}],idempotencyKey:'journey-cart-key'};
+      await http('/api/cart-checkout',{...cart,total_kobo:1},buyer,400);
+      const responses=await Promise.all(Array.from({length:5},()=>http('/api/cart-checkout',cart,buyer,201)));
+      const oid=responses[0].orderIds[0];assert(responses.every(x=>x.orderIds[0]===oid));
+      await http('/api/cart-checkout',{...cart,items:[{productId:draft.id,quantity:2}]},buyer,409);
+      const owned=(await http('/api/orders',undefined,buyer)).find(x=>x.id===oid);
+      assert.equal(Number(owned.total_kobo),12345);assert.equal(owned.lifecycle,'reserved');
+      assert(!(await http('/api/orders',undefined,otherBuyer)).some(x=>x.id===oid));
+      assert(!(await http('/api/orders',undefined,stranger)).some(x=>x.id===oid));
+      await http('/api/demo-orders/'+oid+'/cancel',{},otherBuyer,400);
+      await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle:'processing'},stranger,400);
+      await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle:'shipped'},seller,409);
+      for(const lifecycle of ['processing','shipped','delivered']) await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle},seller,201);
+      await http('/api/demo-orders/'+oid+'/cancel',{},buyer,409);
+      assert.equal((await http('/api/orders',undefined,buyer)).find(x=>x.id===oid).lifecycle,'delivered');
+      const cancellable=await http('/api/cart-checkout',{...cart,idempotencyKey:'journey-cancel-key'},buyer,201);
+      await Promise.all(Array.from({length:4},()=>http('/api/demo-orders/'+cancellable.orderIds[0]+'/cancel',{},buyer,201)));
+      assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,1);
+      // Later cart failure rolls back all earlier reservations and orders.
+      const missing='ffffffff-ffff-4fff-8fff-ffffffffffff';
+      await http('/api/cart-checkout',{items:[{productId:draft.id,quantity:1},{productId:missing,quantity:1}],idempotencyKey:'journey-rollback'},buyer,409);
+      assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,1);
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM demo_orders WHERE product_id=$1',[draft.id])).rows[0].n,2);
+      await http('/api/auth/logout',{},buyer,201);
+      await http('/api/orders',undefined,buyer,401);
+    } finally {await app.close();}
+    await constraint('UPDATE products SET stock_demo=-1 WHERE id=$1',[product],'23514');
   } finally {
     if(pool) await pool.end();
     if(created) await admin.query(`DROP SCHEMA ${schema} CASCADE`);

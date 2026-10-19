@@ -64,14 +64,14 @@ function context(controller,handler,request) {
 test('global guard denies anonymous writes, wrong roles and unknown handlers',async()=>{
   const auth=new AuthService(store(null));
   const guard=new AuthGuard(auth);
-  for(const handler of ['create','join','checkout']) await rejectsStatus(guard.canActivate(context('ApiController',handler,{method:'POST',headers:{}})),401);
+  for(const handler of ['create','join','checkout','cancelGroup','expireGroup','cancelOrder']) await rejectsStatus(guard.canActivate(context('ApiController',handler,{method:'POST',headers:{}})),401);
   auth.authenticate=async()=>principal;
   await rejectsStatus(guard.canActivate(context('ApiController','create',{method:'POST',headers:{}})),403);
   await rejectsStatus(guard.canActivate(context('ApiController','futureWrite',{method:'POST',headers:{}})),403);
   assert(await guard.canActivate(context('ApiController','join',{method:'POST',headers:{}})));
   assert(await guard.canActivate(context('ApiController','checkout',{method:'POST',headers:{}})));
   auth.authenticate=async()=>({...principal,role:'merchant',merchant_id:'tenant-a'});
-  for(const handler of ['join','checkout']) await rejectsStatus(guard.canActivate(context('ApiController',handler,{method:'POST',headers:{}})),403);
+  for(const handler of ['join','checkout','cancelOrder']) await rejectsStatus(guard.canActivate(context('ApiController',handler,{method:'POST',headers:{}})),403);
   assert(await guard.canActivate(context('ApiController','create',{method:'POST',headers:{}})));
   assert(await guard.canActivate(context('ApiController','health',{method:'GET',headers:{}})));
   assert(await guard.canActivate(context('AuthController','login',{method:'POST',headers:{}})));
@@ -106,20 +106,19 @@ test('server rejects invalid shapes and mutable input before any database writes
 test('buyer writes derive ownership from authenticated account and duplicate joins roll back',async()=>{
   const calls=[];
   let duplicate=false;
-  const db={pool:{async query(sql,params){
+  const db={pool:{async connect(){return {release(){calls.push(['release']);},async query(sql,params){
     calls.push([sql,params]);
-    if(sql.includes('SELECT price_kobo')) return {rowCount:1,rows:[{price_kobo:100}]};
-    if(sql.includes('INSERT INTO demo_orders')) return {rows:[{id:'order'}]};
-    throw Error('Unexpected query');
-  },async connect(){return {release(){calls.push(['release']);},async query(sql,params){
-    calls.push([sql,params]);
-    if(sql.includes('FOR UPDATE')) return {rowCount:1,rows:[{id:productId,min_members:2,max_members:5,expires_at:new Date(Date.now()+60000)}]};
+    if(sql.includes('SELECT clock_timestamp()')) return {rows:[{elapsed:false}]};
+    if(sql.includes('FROM demo_orders')) return {rowCount:0,rows:[]};
+    if(sql.includes('INSERT INTO demo_orders')) return {rows:[{id:'order',total_kobo:200,lifecycle:'reserved'}]};
+    if(sql.includes('UPDATE products')) return {rowCount:1,rows:[{price_kobo:100}]};
+    if(sql.includes('FOR UPDATE')) return {rowCount:1,rows:[{id:productId,product_id:productId,lifecycle:'open',elapsed:false,min_members:2,max_members:5,expires_at:new Date(Date.now()+60000)}]};
     if(sql.includes('COUNT(*)')) return {rows:[{n:0}]};
     if(sql.includes('INSERT INTO campaign_members') && duplicate) throw Object.assign(Error('duplicate'),{code:'23505'});
     return {rows:[]};
   }}}}};
   const api=new ApiController(db);
-  const result=await api.checkout({productId,quantity:2},{principal});
+  const result=await api.checkout({productId,quantity:2,idempotencyKey:'synthetic-key'},{principal});
   assert.equal(result.paymentCaptured,false);
   assert.equal(calls.find(([sql])=>sql.includes('INSERT INTO demo_orders'))[1][3],principal.id);
   await api.join(productId,{demoAlias:'synthetic-alias'},{principal});
@@ -127,7 +126,7 @@ test('buyer writes derive ownership from authenticated account and duplicate joi
   duplicate=true;
   await rejectsStatus(api.join(productId,{demoAlias:'other-alias'},{principal}),409);
   assert(calls.some(([sql])=>sql==='ROLLBACK'));
-  assert.equal(calls.filter(([sql])=>sql==='release').length,2);
+  assert.equal(calls.filter(([sql])=>sql==='release').length,3);
 });
 test('login rejects malformed and oversized inputs without credential or session queries',async()=>{
   const auth=new AuthService({pool:{async query(sql){
@@ -200,4 +199,14 @@ test('concurrent login preserves raw storage and programming errors without HTTP
       assert.equal(result.reason,failure);
     }
   }
+});
+test('shopping routes enforce existing sessions and merchant/buyer roles',async()=>{
+  const auth=new AuthService(store(null));const guard=new AuthGuard(auth);
+  for(const handler of ['createProduct','publishProduct','merchantProducts','fulfill','cartCheckout','orders']) {
+    await rejectsStatus(guard.canActivate(context('ApiController',handler,{method:'POST',headers:{}})),401);
+  }
+  auth.authenticate=async()=>principal;
+  for(const handler of ['createProduct','publishProduct','merchantProducts','fulfill'])await rejectsStatus(guard.canActivate(context('ApiController',handler,{method:'POST',headers:{}})),403);
+  auth.authenticate=async()=>({...principal,role:'merchant',merchant_id:productId});
+  await rejectsStatus(guard.canActivate(context('ApiController','cartCheckout',{method:'POST',headers:{}})),403);
 });
