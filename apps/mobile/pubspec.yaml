@@ -1,0 +1,12 @@
+name: imarket_customer
+description: IMarket local demo cross-platform mobile storefront (not production)
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.4.0
+flutter:
+  uses-material-design: true

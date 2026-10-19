@@ -1,0 +1,30 @@
+name: IMarket safe automated build
+on:
+  push:
+    branches: [main, develop, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check policies and offline domain unit tests
+        run: npm run check:offline
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Compile NestJS and Next.js (no deploy)
+        run: npm run build
+      - name: Dependency vulnerability scan
+        run: npm audit --audit-level=high

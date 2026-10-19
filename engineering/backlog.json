@@ -1,0 +1,9 @@
+[
+  {"id":"IMK-001","title":"Scaffold marketplace and secure automation","status":"starter-created","acceptance":["offline validator passes","domain tests pass","build workflow exists","real money and production remain disabled"]},
+  {"id":"IMK-002","title":"Authentication and merchant tenant isolation","status":"planned","acceptance":["add login with short-lived sessions and secure credential storage","enforce RBAC in API for all mutable endpoints","negative tenant access tests","server-side input validation","administrator MFA and rate limit design"]},
+  {"id":"IMK-003","title":"Verified inventory and order lifecycle","status":"planned","acceptance":["atomic inventory reservations","idempotent order creation","group expiry and cancellation transitions","concurrency tests with PostgreSQL","no real financial capture"]},
+  {"id":"IMK-004","title":"Contracted PSP sandbox integration","status":"blocked","acceptance":["provider contract and legal signoff","webhook signature verification","idempotency and reconciliation","refund and failure controls","synthetic PSP sandbox only until release approval"]},
+  {"id":"IMK-005","title":"Merchant management and buyer protection","status":"planned","acceptance":["merchant onboarding review","product moderation","customer dispute workflow","audit records","accessible web/mobile experiences"]},
+  {"id":"IMK-006","title":"Prepayment and credit legal review","status":"blocked","acceptance":["legal assessment of Nigerian payments and consumer credit","transparent fee and cancellation schedules","licensed service-provider arrangement as required","privacy and risk testing","no premature early delivery"]},
+  {"id":"IMK-007","title":"Private pilot readiness","status":"blocked","acceptance":["full threat model","accessibility and abuse testing","rollback and incident response","signed release approval","metrics and supplier verification"]}
+]
