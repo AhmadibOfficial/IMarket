@@ -1,5 +1,6 @@
 require('reflect-metadata');
 const {test}=require('node:test');
+const {assertSettledHttp}=require('./settled-http.cjs');
 const assert=require('node:assert/strict');
 const {AuthService,objectInput}=require('../dist/auth.service');
 const {AuthGuard}=require('../dist/auth.guard');
@@ -55,8 +56,7 @@ test('parallel login attempts share an account limit across service instances',a
   const db=store(null);
   const a=new AuthService(db), b=new AuthService(db);
   const results=await Promise.allSettled(Array.from({length:10},(_,i)=>(i%2?a:b).login({alias:'synthetic-buyer',password:'synthetic-test-password'},`ip-${i}`)));
-  assert.equal(results.filter(r=>r.reason?.getStatus()===429).length,5);
-  assert.equal(results.filter(r=>r.reason?.getStatus()===401).length,5);
+  assertSettledHttp(results,{401:5,429:5},'parallel alias logins');
 });
 function context(controller,handler,request) {
   return {getClass:()=>({name:controller}),getHandler:()=>({name:handler}),switchToHttp:()=>({getRequest:()=>request})};
@@ -170,5 +170,34 @@ test('invalid UUIDs and noninteger campaign values never reach storage',async()=
   for(const id of ['bad',null,123,productId+"' OR 1=1"]) await rejectsStatus(api.join(id,{demoAlias:'demo_test'},{principal}),400);
   for(const field of ['minMembers','maxMembers','durationHours']) for(const value of ['2',null,NaN,Infinity,2.5,Number.MAX_SAFE_INTEGER+1]) {
     await rejectsStatus(api.create({...{productId,minMembers:2,maxMembers:5,durationHours:1},[field]:value},{principal}),400);
+  }
+});
+
+test('concurrent assertions preserve database, connection and programming failures',()=>{
+  const {HttpException}=require('@nestjs/common');
+  const failures=[Object.assign(new Error('synthetic database failure'),{code:'42P01'}),
+    Object.assign(new Error('synthetic connection failure'),{code:'ECONNREFUSED'}),
+    new TypeError('synthetic programming failure'), {getStatus:()=>401}, null];
+  const rejected=reason=>({status:'rejected',reason});
+  assertSettledHttp([rejected(new HttpException('credentials',401)),rejected(new HttpException('quota',429))],{401:1,429:1},'expected');
+  assert.throws(()=>assertSettledHttp(failures.map(rejected),{401:5},'failures'),error=>{
+    assert(error instanceof AggregateError);
+    assert.equal(error.errors.length,failures.length);
+    error.errors.forEach((entry,i)=>assert.equal(entry.cause,failures[i]));
+    return true;
+  });
+  assert.throws(()=>assertSettledHttp([{status:'fulfilled',value:undefined}],{401:1},'fulfilled'),AggregateError);
+  assert.throws(()=>assertSettledHttp([rejected(new HttpException('server',500))],{401:1},'status'),AggregateError);
+  assert.throws(()=>assertSettledHttp([rejected(new HttpException('credentials',401))],{401:2},'count'),assert.AssertionError);
+});
+test('concurrent login preserves raw storage and programming errors without HTTP conversion',async()=>{
+  for(const failure of [Object.assign(new Error('synthetic database failure'),{code:'42P01'}),
+    Object.assign(new Error('synthetic connection failure'),{code:'ECONNREFUSED'}),new TypeError('synthetic programming failure')]) {
+    const auth=new AuthService({pool:{async query(){throw failure;}}});
+    const results=await Promise.allSettled(Array.from({length:3},()=>auth.login({alias:'demo_test',password:'synthetic-test-password'},'local')));
+    for(const result of results) {
+      assert.equal(result.status,'rejected');
+      assert.equal(result.reason,failure);
+    }
   }
 });

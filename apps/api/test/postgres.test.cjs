@@ -4,6 +4,7 @@ const assert=require('node:assert/strict');
 const {Pool}=require('pg');
 const {readFileSync}=require('node:fs');
 const {randomUUID}=require('node:crypto');
+const {assertSettledHttp}=require('./settled-http.cjs');
 const {AuthService}=require('../dist/auth.service');
 const {ApiController}=require('../dist/api.controller');
 const {hashPassword,tokenHash}=require('@imarket/commerce-domain/auth.cjs');
@@ -79,14 +80,12 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     await constraint('INSERT INTO auth_limits VALUES($1,0,now())',['invalid-count'],'23514');
     const other=new AuthService({pool});
     const logins=await Promise.allSettled(Array.from({length:10},(_,i)=>(i%2?auth:other).login({alias:'demo_unknown',password},`local-${i}`)));
-    assert.equal(logins.filter(r=>r.reason?.getStatus()===401).length,5);
-    assert.equal(logins.filter(r=>r.reason?.getStatus()===429).length,5);
+    assertSettledHttp(logins,{401:5,429:5},'parallel alias logins');
     const ipLogins=await Promise.allSettled(Array.from({length:35},(_,i)=>(i%2?auth:other).login({alias:`demo_missing_${i}`,password},'shared-local')));
-    assert.equal(ipLogins.filter(r=>r.reason?.getStatus()===401).length,30);
-    assert.equal(ipLogins.filter(r=>r.reason?.getStatus()===429).length,5);
+    assertSettledHttp(ipLogins,{401:30,429:5},'parallel IP logins');
     const results=await Promise.allSettled(Array.from({length:20},()=>auth.limit('parallel-key',5)));
     assert.equal(results.filter(x=>x.status==='fulfilled').length,5);
-    assert.equal(results.filter(x=>x.reason?.getStatus()===429).length,15);
+    assertSettledHttp(results.filter(x=>x.status==='rejected'),{429:15},'parallel limit rejections');
     await pool.query("UPDATE auth_limits SET resets_at=now()-interval '1 second'");
     await auth.limit('parallel-key',5);
   } finally {
