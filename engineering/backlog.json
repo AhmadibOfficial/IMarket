@@ -25,7 +25,7 @@
   {
     "id": "IMK-003",
     "title": "Verified inventory and order lifecycle",
-    "status": "planned",
+    "status": "verified",
     "acceptance": [
       "atomic inventory reservations",
       "idempotent order creation",
