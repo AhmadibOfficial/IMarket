@@ -24,6 +24,8 @@ jobs:
         run: npm run check:offline
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      - name: Authentication and tenant API tests
+        run: npm run test -w @imarket/api
       - name: Compile NestJS and Next.js (no deploy)
         run: npm run build
       - name: Dependency vulnerability scan

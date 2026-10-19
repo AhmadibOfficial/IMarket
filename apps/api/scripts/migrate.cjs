@@ -9,6 +9,7 @@ const client=new Client({connectionString:url});
   await client.connect();
   try {
     await client.query(readFileSync(resolve(__dirname,'../migrations/001_init.sql'),'utf8'));
-    console.log('Applied IMK-001 demo schema / idempotent seed.');
+    await client.query(readFileSync(resolve(__dirname,'../migrations/002_auth.sql'),'utf8'));
+    console.log('Applied local demo schema and authentication migration.');
   } finally {await client.end();}
 })().catch((e)=>{console.error('Migration error:',e.message);process.exitCode=1;});

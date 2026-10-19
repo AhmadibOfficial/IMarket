@@ -2,7 +2,11 @@
   "name": "imarket-workspace",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["apps/api", "apps/web", "packages/commerce-domain"],
+  "workspaces": [
+    "apps/api",
+    "apps/web",
+    "packages/commerce-domain"
+  ],
   "scripts": {
     "doctor": "python3 scripts/verify_project.py",
     "test": "node --test packages/commerce-domain/*.test.cjs",
@@ -11,8 +15,10 @@
     "dev:web": "npm run dev -w @imarket/web",
     "db:migrate": "npm run db:migrate -w @imarket/api",
     "build": "npm run build -w @imarket/api && npm run build -w @imarket/web",
-    "ci": "npm run check:offline && npm run build",
+    "ci": "npm run check:offline && npm run test -w @imarket/api && npm run build",
     "next-task": "python3 scripts/next_task.py"
   },
-  "engines": {"node": ">=22"}
+  "engines": {
+    "node": ">=22"
+  }
 }

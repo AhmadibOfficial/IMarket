@@ -28,7 +28,7 @@ chmod +x scripts/*.sh
 
 If you prefer manual control: `docker compose up -d postgres`, `npm install`, `npm run db:migrate`, `npm run dev:api`, and `npm run dev:web` in separate terminals.
 
-The Postgres development user/password in `.env.example` and compose.yaml are **local-only sample credentials**; never reuse them in any deployment. No password is needed for the demo shopper because **real account authentication is not implemented**.
+The Postgres development user/password in `.env.example` and compose.yaml are **local-only sample credentials**; never reuse them in any deployment. Mutable demo API routes require synthetic local accounts and short-lived bearer sessions; see [local authentication setup](docs/AUTHENTICATION.md). Real customer authentication remains release-gated.
 
 ### Flutter
 
@@ -74,12 +74,12 @@ The script refuses dirty worktrees, creates a task-specific feature branch, pass
 - `POST /api/groups/:id/join` `{ "demoAlias": "tester01" }`
 - `POST /api/demo-checkout` `{ "productId": "...", "quantity": 1 }` (no money is collected; returns `SIMULATED_ONLY`)
 
-**All APIs are local demo APIs without user authentication and must not be internet exposed**. User accounts, real payments, card handling, finance, payout and shipping are **not implemented**. Group deals do not reserve stock, capture funds or guarantee delivery.
+**All APIs are local demo APIs and must not be internet exposed**. Synthetic account authentication is implemented for local API testing; real customer access, payments, card handling, finance, payout and shipping remain disabled. Group deals do not reserve stock, capture funds or guarantee delivery.
 
 ## Delivery phases
 
 - IMK-001: engineering foundation + demo marketplace and group engine (this starter)
-- IMK-002: production-grade authentication, merchant identity, roles and tenancy
+- IMK-002: local authentication, merchant roles and tenancy; real-access release review remains required
 - IMK-003: inventory reservation and order state machine + idempotency
 - IMK-004: approved payment-provider sandbox + verified webhook reconciliation
 - IMK-005: merchant portal and buyer protection testing

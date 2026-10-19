@@ -6,7 +6,9 @@
     "start:dev": "APP_DEMO_MODE=true tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "db:migrate": "node scripts/migrate.cjs"
+    "db:migrate": "node scripts/migrate.cjs",
+    "test": "npm run build && node --test test/*.test.cjs",
+    "account:create": "node scripts/create-account.cjs"
   },
   "dependencies": {
     "@imarket/commerce-domain": "0.1.0",

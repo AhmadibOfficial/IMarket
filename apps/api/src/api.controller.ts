@@ -1,4 +1,5 @@
-import { BadRequestException, ConflictException, Controller, Get, HttpException, Inject, Param, Post, Body } from '@nestjs/common';
+import { BadRequestException, ConflictException, Controller, Get, HttpException, Inject, Param, Post, Body, Req } from '@nestjs/common';
+import { Principal, objectInput } from './auth.service';
 import { DbService } from './db.service';
 import { groupState, validateCampaign, validateDemoAlias, totalKobo } from '@imarket/commerce-domain';
 import { randomUUID } from 'node:crypto';
@@ -31,23 +32,24 @@ export class ApiController {
        GROUP BY c.id,p.name,p.group_price_kobo ORDER BY c.created_at DESC LIMIT 40`);
     return r.rows.map(x=>({...x,group_price_kobo:presentMoney(x.group_price_kobo),state:groupState({members:x.members,minMembers:x.min_members,maxMembers:x.max_members,expiresAt:x.expires_at.toISOString()})}));
   }
-  @Post('api/groups') async create(@Body() input: Record<string,unknown>) {
+  @Post('api/groups') async create(@Body() input: Record<string,unknown>, @Req() request: {principal: Principal}) {
     try {
-      if (!input || typeof input!=='object') throw new Error('INVALID_REQUEST');
+      objectInput(input,['productId','minMembers','maxMembers','durationHours']);
       const productId=uuid(input.productId);
       const minMembers=safeInt(input.minMembers);
       const maxMembers=safeInt(input.maxMembers);
       const durationHours=safeInt(input.durationHours);
       validateCampaign({minMembers,maxMembers,durationHours});
-      const p=await this.db.pool.query('SELECT id FROM products WHERE id=$1',[productId]);
+      const p=await this.db.pool.query('SELECT id FROM products WHERE id=$1 AND merchant_id=$2',[productId,request.principal.merchant_id]);
       if(!p.rowCount) throw new BadRequestException('Unknown demo product');
-      const r=await this.db.pool.query(`INSERT INTO campaigns (product_id,min_members,max_members,expires_at)
-          VALUES($1,$2,$3, now() + ($4 * interval '1 hour')) RETURNING id,product_id,min_members,max_members,expires_at`,
-          [productId,minMembers,maxMembers,durationHours]);
+      const r=await this.db.pool.query(`INSERT INTO campaigns (product_id,min_members,max_members,expires_at,merchant_id)
+          VALUES($1,$2,$3, now() + ($4 * interval '1 hour'),$5) RETURNING id,product_id,min_members,max_members,expires_at`,
+          [productId,minMembers,maxMembers,durationHours,request.principal.merchant_id]);
       return {...r.rows[0],state:'open',members:0,mode:'SIMULATED_ONLY'};
-    } catch(e) {if(e instanceof HttpException) throw e; throw new BadRequestException(e instanceof Error ? e.message : 'Bad request');}
+    } catch(e) {if(e instanceof HttpException) throw e; throw new BadRequestException('Invalid campaign request');}
   }
-  @Post('api/groups/:id/join') async join(@Param('id') id: string, @Body() input: Record<string,unknown>) {
+  @Post('api/groups/:id/join') async join(@Param('id') id: string, @Body() input: Record<string,unknown>, @Req() request: {principal: Principal}) {
+    objectInput(input,['demoAlias']);
     uuid(id);
     let alias:string;
     try {alias=validateDemoAlias(input?.demoAlias);}catch(e){throw new BadRequestException(e instanceof Error ? e.message : 'Invalid demo alias');}
@@ -61,7 +63,7 @@ export class ApiController {
       const before=groupState({members:count.rows[0].n,minMembers:c.min_members,maxMembers:c.max_members,expiresAt:c.expires_at.toISOString()});
       if (new Date(c.expires_at).getTime() <= Date.now()) throw new ConflictException('Campaign expired');
       if (before === 'full') throw new ConflictException('Campaign full');
-      await client.query('INSERT INTO campaign_members(id,campaign_id,demo_alias) VALUES($1,$2,$3)',[randomUUID(),id,alias]);
+      await client.query('INSERT INTO campaign_members(id,campaign_id,demo_alias,account_id) VALUES($1,$2,$3,$4)',[randomUUID(),id,alias,request.principal.id]);
       const members=count.rows[0].n+1;
       await client.query('COMMIT');
       return {id, members, state:groupState({members,minMembers:c.min_members,maxMembers:c.max_members,expiresAt:c.expires_at.toISOString()}),mode:'SIMULATED_ONLY'};
@@ -71,15 +73,15 @@ export class ApiController {
       throw e;
     } finally {client.release();}
   }
-  @Post('api/demo-checkout') async checkout(@Body() input: Record<string,unknown>) {
-    if (!input || typeof input!=='object') throw new BadRequestException('Bad request');
+  @Post('api/demo-checkout') async checkout(@Body() input: Record<string,unknown>, @Req() request: {principal: Principal}) {
+    objectInput(input,['productId','quantity']);
     const productId=uuid(input.productId);
     const quantity=safeInt(input.quantity);
     const r=await this.db.pool.query('SELECT price_kobo FROM products WHERE id=$1',[productId]);
     if(!r.rowCount) throw new BadRequestException('Product not found');
     let total: number;
     try {total=totalKobo(presentMoney(r.rows[0].price_kobo),quantity);} catch(e) {throw new BadRequestException(e instanceof Error ? e.message : 'Invalid quantity');}
-    const result=await this.db.pool.query('INSERT INTO demo_orders(product_id,quantity,total_kobo) VALUES($1,$2,$3) RETURNING id',[productId,quantity,total]);
+    const result=await this.db.pool.query('INSERT INTO demo_orders(product_id,quantity,total_kobo,account_id) VALUES($1,$2,$3,$4) RETURNING id',[productId,quantity,total,request.principal.id]);
     return {id:result.rows[0].id, status:'SIMULATED_ONLY',total_kobo:total,currency:'NGN',paymentCaptured:false,fulfilmentCreated:false};
   }
 }
