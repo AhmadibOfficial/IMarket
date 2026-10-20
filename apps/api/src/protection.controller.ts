@@ -1,0 +1,54 @@
+import { BadRequestException, ConflictException, Controller, Get, Post, Param, Body, Req, Inject, ForbiddenException } from '@nestjs/common';
+import { DbService } from './db.service';
+import { Principal, objectInput } from './auth.service';
+import { transaction } from './inventory';
+import { PoolClient } from 'pg';
+type Request = {principal:Principal};
+export function identifier(value:unknown):string {
+ if(typeof value!=='string'||! /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value)) throw new BadRequestException('Invalid ID');
+ return value;
+}
+export function text(value:unknown,max=2000):string {
+ if(typeof value!=='string'||value.trim().length<3||value.length>max||/[\x00-\x08\x0b-\x1f\x7f]/.test(value)) throw new BadRequestException('Invalid text');
+ return value.trim();
+}
+export async function audit(c:PoolClient,p:Principal,action:string,id:string){await c.query('INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,$2,$3)',[p.id,action,id]);}
+@Controller('api')
+export class ProtectionController {
+ constructor(@Inject(DbService) private readonly db:DbService){}
+ private role(r:Request,...roles:string[]){if(!roles.includes(r.principal.role)||(r.principal.role==='merchant'&&!r.principal.merchant_id))throw new ForbiddenException();}
+ @Get('merchant/application') async application(@Req() r:Request){this.role(r,'merchant');return (await this.db.pool.query('SELECT id,alias,status FROM merchants WHERE id=$1',[r.principal.merchant_id])).rows[0];}
+ @Post('merchant/application') async apply(@Body() body:Record<string,unknown>,@Req() r:Request){
+ this.role(r,'merchant');objectInput(body,[]);
+ return transaction(this.db.pool,async c=>{const m=await c.query("UPDATE merchants SET status='pending' WHERE id=$1 AND status IN ('pending','rejected') RETURNING id,status",[r.principal.merchant_id]);if(!m.rowCount)throw new ConflictException('Application cannot be submitted');await audit(c,r.principal,'merchant.application',m.rows[0].id);return m.rows[0];});}
+ @Get('merchant/overview') async overview(@Req() r:Request){
+ this.role(r,'merchant');
+ return (await this.db.pool.query(`SELECT
+ (SELECT count(*)::int FROM products WHERE merchant_id=$1) AS products,
+ (SELECT count(*)::int FROM products WHERE merchant_id=$1 AND published AND moderation='approved') AS published,
+ (SELECT count(*)::int FROM demo_orders o JOIN products p ON p.id=o.product_id WHERE p.merchant_id=$1 AND o.lifecycle IN ('reserved','processing','shipped')) AS active_orders,
+ (SELECT count(*)::int FROM disputes d JOIN demo_orders o ON o.id=d.order_id JOIN products p ON p.id=o.product_id WHERE p.merchant_id=$1 AND d.status IN ('open','responded')) AS open_disputes`,[r.principal.merchant_id])).rows[0];
+ }
+ @Post('merchant/products/:id/edit') async edit(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){
+ this.role(r,'merchant');identifier(id);objectInput(body,['name','description']);
+ const name=text(body.name,500),description=text(body.description,500);
+ return transaction(this.db.pool,async c=>{
+ const result=await c.query("UPDATE products SET name=$3,description=$4,published=false,moderation='pending' WHERE id=$1 AND merchant_id=$2 RETURNING *",[id,r.principal.merchant_id,name,description]);
+ if(!result.rowCount)throw new BadRequestException('Product not found');
+ await audit(c,r.principal,'product.edit',id);return result.rows[0];});
+ }
+ @Get('admin/reviews') async reviews(@Req() r:Request){this.role(r,'admin');return {merchants:(await this.db.pool.query('SELECT id,alias,status FROM merchants ORDER BY alias')).rows,products:(await this.db.pool.query('SELECT id,name,merchant_id,moderation,published FROM products WHERE merchant_id IS NOT NULL ORDER BY created_at')).rows};}
+ @Post('admin/merchants/:id/review') async reviewMerchant(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){
+ this.role(r,'admin');identifier(id);objectInput(body,['status']);if(!['approved','rejected','suspended'].includes(body.status as string))throw new BadRequestException('Invalid decision');
+ return transaction(this.db.pool,async c=>{const m=await c.query('UPDATE merchants SET status=$2 WHERE id=$1 RETURNING id,status',[id,body.status]);if(!m.rowCount)throw new BadRequestException('Merchant not found');await audit(c,r.principal,`merchant.${body.status}`,id);return m.rows[0];});}
+ @Post('merchant/products/:id/submit') async submit(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){this.role(r,'merchant');identifier(id);objectInput(body,[]);return transaction(this.db.pool,async c=>{const p=await c.query("UPDATE products SET moderation='pending',published=false WHERE id=$1 AND merchant_id=$2 RETURNING id,moderation",[id,r.principal.merchant_id]);if(!p.rowCount)throw new BadRequestException('Product not found');await audit(c,r.principal,'product.submit',id);return p.rows[0];});}
+ @Post('admin/products/:id/review') async reviewProduct(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){this.role(r,'admin');identifier(id);objectInput(body,['decision']);if(!['publish','reject','unpublish'].includes(body.decision as string))throw new BadRequestException('Invalid decision');return transaction(this.db.pool,async c=>{await c.query('SELECT m.id FROM merchants m JOIN products p ON p.merchant_id=m.id WHERE p.id=$1 FOR SHARE OF m',[id]);const p=await c.query('SELECT p.*,m.status FROM products p JOIN merchants m ON m.id=p.merchant_id WHERE p.id=$1 FOR UPDATE OF p',[id]);if(!p.rowCount)throw new BadRequestException('Product not found');if(body.decision==='publish'&&p.rows[0].status!=='approved')throw new ConflictException('Merchant not approved');const result=await c.query('UPDATE products SET published=$2,moderation=$3 WHERE id=$1 RETURNING id,published,moderation',[id,body.decision==='publish',body.decision==='reject'?'rejected':body.decision==='publish'?'approved':p.rows[0].moderation]);await audit(c,r.principal,`product.${body.decision}`,id);return result.rows[0];});}
+ @Post('merchant/products/:id/stock') async stock(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){this.role(r,'merchant');identifier(id);objectInput(body,['add']);if(typeof body.add!=='number'||!Number.isSafeInteger(body.add)||body.add<1||body.add>1000000)throw new BadRequestException('Invalid stock addition');return transaction(this.db.pool,async c=>{const result=await c.query('UPDATE products SET stock_demo=stock_demo+$3 WHERE id=$1 AND merchant_id=$2 AND stock_demo+$3<=1000000 RETURNING id,stock_demo',[id,r.principal.merchant_id,body.add]);if(!result.rowCount)throw new BadRequestException('Product not found or stock limit');await audit(c,r.principal,'inventory.add',id);return result.rows[0];});}
+ @Get('orders/:id') async orderDetail(@Param('id') id:string,@Req() r:Request){this.role(r,'buyer','merchant');identifier(id);const result=await this.db.pool.query(`SELECT o.id,o.quantity,o.total_kobo,o.lifecycle,o.created_at,p.name,p.description FROM demo_orders o JOIN products p ON p.id=o.product_id WHERE o.id=$1 AND (($2='buyer' AND o.account_id=$3) OR ($2='merchant' AND p.merchant_id=$4))`,[id,r.principal.role,r.principal.id,r.principal.merchant_id]);if(!result.rowCount)throw new BadRequestException('Order not found');return result.rows[0];}
+ @Get('disputes') async disputes(@Req() r:Request){this.role(r,'buyer','merchant','admin');return (await this.db.pool.query(`SELECT d.*,p.name FROM disputes d JOIN demo_orders o ON o.id=d.order_id JOIN products p ON p.id=o.product_id WHERE ($1='admin' OR ($1='buyer' AND o.account_id=$2) OR ($1='merchant' AND p.merchant_id=$3)) ORDER BY d.created_at DESC LIMIT 100`,[r.principal.role,r.principal.id,r.principal.merchant_id])).rows;}
+ @Post('disputes') async open(@Body() body:Record<string,unknown>,@Req() r:Request){this.role(r,'buyer');objectInput(body,['orderId','reason','evidence','refundRequested']);const id=identifier(body.orderId),reason=text(body.reason),evidence=text(body.evidence,4000);if(typeof body.refundRequested!=='boolean')throw new BadRequestException('Invalid refund flag');return transaction(this.db.pool,async c=>{const o=await c.query('SELECT id FROM demo_orders WHERE id=$1 AND account_id=$2 FOR UPDATE',[id,r.principal.id]);if(!o.rowCount)throw new BadRequestException('Order not found');if((await c.query('SELECT id FROM disputes WHERE order_id=$1',[id])).rowCount)throw new ConflictException('Dispute already exists');const d=(await c.query('INSERT INTO disputes(order_id,reason,evidence,refund_requested) VALUES($1,$2,$3,$4) RETURNING *',[id,reason,evidence,body.refundRequested])).rows[0];await audit(c,r.principal,'dispute.open',d.id);return d;});}
+ @Post('disputes/:id/respond') async respond(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){this.role(r,'merchant');objectInput(body,['response']);return this.change(id,r,'responded',text(body.response));}
+ @Post('disputes/:id/resolve') async resolve(@Param('id') id:string,@Body() body:Record<string,unknown>,@Req() r:Request){this.role(r,'admin');objectInput(body,['status','resolution']);if(!['resolved','rejected'].includes(body.status as string))throw new BadRequestException('Invalid resolution');return this.change(id,r,body.status as string,text(body.resolution));}
+ private async change(id:string,r:Request,status:string,note:string){identifier(id);return transaction(this.db.pool,async c=>{const d=await c.query(`SELECT d.* FROM disputes d JOIN demo_orders o ON o.id=d.order_id JOIN products p ON p.id=o.product_id WHERE d.id=$1 AND ($2='admin' OR p.merchant_id=$3) FOR UPDATE OF d`,[id,r.principal.role,r.principal.merchant_id]);if(!d.rowCount)throw new BadRequestException('Dispute not found');if(!['open','responded'].includes(d.rows[0].status)||status==='responded'&&d.rows[0].status!=='open')throw new ConflictException('Dispute transition unavailable');const result=await c.query(`UPDATE disputes SET status=$2,${status==='responded'?'response':'resolution'}=$3 WHERE id=$1 RETURNING *`,[id,status,note]);await audit(c,r.principal,`dispute.${status}`,id);return result.rows[0];});}
+ @Get('admin/audit') async audits(@Req() r:Request){this.role(r,'admin');return (await this.db.pool.query('SELECT * FROM marketplace_audit ORDER BY created_at DESC LIMIT 100')).rows;}
+}

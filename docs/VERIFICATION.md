@@ -121,3 +121,38 @@ Verification evidence:
 GitHub Actions runs the strict gate with an isolated PostgreSQL service. No remote CI run was triggered. Remaining limitations include in-memory client sessions/carts/keys, 100-order recent history without pagination, no product editing/restocking, no Flutter merchant screen, no background group-expiry scheduler, no real delivery integration, and unverified database/HTTP behavior pending a permitted test run. Synthetic authentication remains local-only, administrators remain fail-closed, and all production/payment/identity release gates remain in force.
 
 Exact next milestone: run `npm run ci` against the dedicated permitted loopback PostgreSQL test database, correct any evidenced integration defects without weakening checks, and run Flutter analysis in a writable SDK environment. IMK-003 remains unverified; IMK-004 remains blocked by separate PSP/legal approvals. No commits, pushes, merges, cloud resources or deployments were made.
+
+## IMK-005 continuation — 2026-10-20
+
+Continued `feature/imk-005-agent-proposal` after inspecting its clean status, prior commits, release gates and existing auth/inventory/shopping implementations. No existing uncommitted work was present. Added migration 005, protection controller, explicit guard allowlist, moderated catalog/reservation enforcement, tenant-scoped stock additions and order details, merchant application and buyer dispute web flows, merchant dispute responses, Flutter tracking and negative/API/PostgreSQL test additions. Details and acceptance limitations are in `docs/MERCHANT_PROTECTION.md`.
+
+Final `npm run ci` report: `/tmp/imarket-validation-I1SgWd/report.json` (full output `/tmp/imk005-verified-ci.log`). Offline structural/security checks and domain tests passed; API TypeScript compilation passed; required combined suite reported **43 tests, 42 passed, 1 failed, zero skipped/cancelled/todo**. The PostgreSQL case failed at its first connection with `connect EPERM 127.0.0.1:5433`, before migration/schema setup or HTTP/concurrency assertions. No database success is claimed. Next.js production compilation, TypeScript checks, prerendering and optimization passed. `git diff --check` passed.
+
+Flutter analysis using the installed absolute SDK path failed before analysis because its engine cache is read-only; the Dart change is unverified. Browser/device accessibility testing was not performed. No test guard was weakened or required test skipped. No commits, pushes, merges, external services, cloud resources, application database migrations or deployments occurred. Payments, finance, production startup and administrator password-only access remain disabled.
+
+Acceptance status: **incomplete / not release-ready**. Local merchant, moderation, dispute and audit business workflows are implemented but database behavior is unverified. Administrator HTTP access remains blocked pending reviewed MFA; admin UI is informational. Remaining work includes full activity overview, product text editing, comprehensive fulfillment/order audit events, file evidence handling, additional HTTP protection tests and accessibility/device verification. Exact next milestone: run the unchanged guarded isolated PostgreSQL target in an environment permitting loopback access, resolve any demonstrated defects, and obtain zero-failure/zero-skip CI before completing the outstanding administrator and experience criteria. No merge is proposed.
+
+## IMK-005 implementation continuation — 2026-10-21
+
+Continued `feature/imk-005-agent-proposal` after inspecting and preserving its existing uncommitted changes. Read AGENTS, release gates, ticket/backlog, auth, inventory/order, migration/API and web implementations. Added encrypted local administrator TOTP enrollment/login and five-minute MFA sessions; functional administrator reviews/resolutions/audit UI; merchant product editing that withdraws prior approval; tenant-scoped activity counts; merchant-only withdrawal with administrator-only publication; transactional product/order audit events; suspension/reservation locking; and Flutter order details and dispute submission/tracking. Migrations 005/006 are registered in the runner and required integration suite. Local fixture provisioning remains operator-only and refuses production. See MERCHANT_PROTECTION.md for the acceptance matrix and limitations.
+
+Final evidence (no required tests disabled):
+
+| Check | Result |
+|---|---|
+| `npm run check:offline` (also rerun by CI) | PASS: structural/safety validator and both domain test files |
+| API TypeScript compilation | PASS |
+| Focused API tests (`admin-mfa`, `auth`, `inventory`, `protection`, individual-case runner) | 29 passed, 0 failed, 0 skipped |
+| Final `npm run ci` | FAIL, exit 1: **48 tests, 47 passed, 1 failed, 0 skipped/cancelled/todo** |
+| Required PostgreSQL test | FAIL at first connection: `connect EPERM 127.0.0.1:5433`; no SQL/HTTP/contention assertion executed |
+| Next.js production build (inside final CI) | PASS: compilation, TypeScript checks, all static routes and optimization |
+| All migrations 001–006 applied twice in fresh isolated PostgreSQL 18 single-user cluster | PASS: exit 0, zero SQL errors; syntax/idempotency evidence only, not concurrency/API verification |
+| Dart static analysis | PASS: `dart --suppress-analytics analyze apps/mobile`, exit 0, `No issues found!` |
+| `git diff --check`; PostgreSQL test JavaScript syntax | PASS |
+| Browser/device/accessibility execution | NOT RUN; no browser test tooling in this environment |
+
+Final strict report: `/tmp/imarket-validation-LIqPR3/report.json`; step logs in the same directory; full output `/tmp/imarket-imk005-final-ci.log`. Single-user cluster and SQL log: `/tmp/imarket-imk005-sql-a7ntt72c/migration.log`. Flutter launcher initially failed writing its SDK cache. Direct Dart offline dependency resolution used existing cached packages and produced the package configuration/lockfile, then reported a read-only cache registration/telemetry error. Direct analysis with `--suppress-analytics` subsequently completed successfully; no Flutter runtime/device/build result is claimed. PostgreSQL TCP and existing Unix-socket probes both returned EPERM. No permission escalation or connection-guard bypass was attempted.
+
+Added tests cover standard TOTP vectors/drift/replay, encrypted-seed account binding/tampering/key loss, atomic MFA/session/audit rollback, invalid attachments/ownership fields, missing merchant tenancy, product edit withdrawal and audit failure rollback. The expanded required SQL/HTTP suite also specifies real administrator MFA login with concurrent replay rejection, wrong-role reviews/resolution, cross-merchant editing/order reads, transactional audit failure, and expired MFA denial. Those integration assertions remain unverified until the guarded database connection succeeds.
+
+Acceptance remains **incomplete**, not release-ready. Text-only evidence is supported; file storage/upload is rejected. Recent list pagination, audit retention/database-role immutability, production-grade MFA/recovery/security review, browser/device accessibility testing and Flutter merchant/admin screens remain limitations. Exact next milestone: run the unchanged required isolated PostgreSQL/HTTP/concurrency suite where local sockets are permitted, correct evidenced defects, obtain zero-failure/zero-skip CI, and finish browser/device accessibility checks. Financial/identity/production release gates remain closed. No commits, pushes, merges, application database migrations, external services, cloud resources or deployments were performed.

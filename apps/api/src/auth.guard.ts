@@ -11,6 +11,12 @@ export class AuthGuard implements CanActivate {
     if (controller === 'AuthController' && handler === 'login' && request.method === 'POST') return true;
     request.res?.setHeader('Cache-Control','no-store');
     request.principal=await this.auth.authenticate(request.headers.authorization);
+    if (controller === 'ProtectionController') {
+      const roles: Record<string,string[]> = {overview:['merchant'],edit:['merchant'],orderDetail:['buyer','merchant'],application:['merchant'],apply:['merchant'],reviews:['admin'],reviewMerchant:['admin'],submit:['merchant'],reviewProduct:['admin'],stock:['merchant'],disputes:['buyer','merchant','admin'],open:['buyer'],respond:['merchant'],resolve:['admin'],audits:['admin']};
+      if (!roles[handler]?.includes(request.principal.role)||(request.principal.role==='merchant'&&!request.principal.merchant_id)) throw new ForbiddenException();
+      await this.auth.limit(`mutation:${request.principal.id}`,120);
+      return true;
+    }
     const roles: Record<string,string>={create:'merchant',join:'buyer',checkout:'buyer',cartCheckout:'buyer',cancelGroup:'merchant',expireGroup:'merchant',cancelOrder:'buyer',merchantProducts:'merchant',createProduct:'merchant',publishProduct:'merchant',fulfill:'merchant'};
     const role=controller === 'ApiController' ? roles[handler] : undefined;
     if(controller === 'ApiController' && handler === 'orders') {

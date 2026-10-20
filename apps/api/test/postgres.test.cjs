@@ -21,11 +21,12 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     await admin.query(`CREATE SCHEMA ${schema}`);
     created=true;
     pool=new Pool({connectionString:process.env.IMARKET_TEST_DATABASE_URL,options:`-c search_path=${schema}`,max:12,connectionTimeoutMillis:2000});
-    for(let pass=0;pass<2;pass++) for(const file of ['001_init.sql','002_auth.sql','003_inventory.sql','004_shopping.sql']) await pool.query(readFileSync(`${__dirname}/../migrations/${file}`,'utf8'));
+    for(let pass=0;pass<2;pass++) for(const file of ['001_init.sql','002_auth.sql','003_inventory.sql','004_shopping.sql','005_protection.sql','006_admin_mfa.sql']) await pool.query(readFileSync(`${__dirname}/../migrations/${file}`,'utf8'));
     const tenants=await pool.query("INSERT INTO merchants(alias) VALUES('demo_tenant_a'),('demo_tenant_b') RETURNING id");
     const [a,b]=tenants.rows.map(x=>x.id);
     const product=(await pool.query('SELECT id FROM products LIMIT 1')).rows[0].id;
-    await pool.query('UPDATE products SET merchant_id=$1 WHERE id=$2',[a,product]);
+    await pool.query("UPDATE merchants SET status='approved'");
+    await pool.query("UPDATE products SET merchant_id=$1,moderation='approved' WHERE id=$2",[a,product]);
     const api=new ApiController({pool});
     const input={productId:product,minMembers:2,maxMembers:4,durationHours:1};
     await assert.rejects(api.create(input,{principal:{id:randomUUID(),role:'merchant',merchant_id:b}}),e=>e.getStatus()===400);
@@ -177,7 +178,7 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     const {AuthGuard}=require('../dist/auth.guard');
     const {DbService}=require('../dist/db.service');
     class JourneyModule {}
-    Module({controllers:[ApiController,AuthController],providers:[{provide:DbService,useValue:{pool}},AuthService,{provide:APP_GUARD,useClass:AuthGuard}]})(JourneyModule);
+    Module({controllers:[ApiController,AuthController,require('../dist/protection.controller').ProtectionController],providers:[{provide:DbService,useValue:{pool}},AuthService,{provide:APP_GUARD,useClass:AuthGuard}]})(JourneyModule);
     await pool.query("INSERT INTO accounts(alias,password_hash,role,merchant_id) VALUES('demo_journey_merchant',$1,'merchant',$2),('demo_journey_other',$1,'merchant',$3)",[hash,a,b]);
     const app=await NestFactory.create(JourneyModule,{logger:false});
     try {
@@ -196,7 +197,52 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
       const draft=await http('/api/merchant/products',listing,seller,201);
       assert(!(await http('/api/products')).some(x=>x.id===draft.id));
       await http('/api/merchant/products/'+draft.id+'/publish',{published:true},stranger,400);
-      await http('/api/merchant/products/'+draft.id+'/publish',{published:true},seller,201);
+      await http('/api/merchant/products/'+draft.id+'/publish',{published:true},seller,400);
+      // Local administrator enrollment: encrypted seed, real MFA login, no privileged session injection.
+      const {ProtectionController}=require('../dist/protection.controller');
+      const protection=new ProtectionController({pool});
+      const adminId=(await pool.query("INSERT INTO accounts(alias,password_hash,role) VALUES('demo_review_admin',$1,'admin') RETURNING id",[hash])).rows[0].id;
+      const adminReq={principal:{id:adminId,role:'admin',merchant_id:null}};
+      const {encryptSeed,totp}=require('../dist/admin-mfa');
+      const previousMfaKey=process.env.IMARKET_MFA_KEY;
+      process.env.IMARKET_MFA_KEY='d'.repeat(64);
+      let adminToken;
+      try {
+        const seed='3132333435363738393031323334353637383930';
+        await pool.query('INSERT INTO admin_mfa(account_id,encrypted_seed) VALUES($1,$2)',[adminId,encryptSeed(seed,adminId)]);
+        await http('/api/auth/login',{alias:'demo_review_admin',password},null,401);
+        await http('/api/auth/login',{alias:'demo_review_admin',password,otp:totp(seed,0)},null,401);
+        const code=totp(seed,Math.floor(Date.now()/30000));
+        const results=await Promise.all(Array.from({length:2},async()=>{
+          const r=await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({alias:'demo_review_admin',password,otp:code})});
+          return {status:r.status,body:await r.json()};
+        }));
+        assert.deepEqual(results.map(r=>r.status).sort(),[201,401]);
+        adminToken=results.find(r=>r.status===201).body.accessToken;
+        await http('/api/auth/login',{alias:'demo_review_admin',password,otp:code},null,401);
+        await http('/api/admin/reviews',undefined,seller,403);
+        await http('/api/admin/reviews',undefined,buyer,403);
+        assert((await http('/api/admin/reviews',undefined,adminToken)).merchants.some(m=>m.id===a));
+        await http(`/api/admin/merchants/${a}/review`,{status:'approved'},adminToken,201);
+      } finally {
+        if(previousMfaKey===undefined)delete process.env.IMARKET_MFA_KEY;else process.env.IMARKET_MFA_KEY=previousMfaKey;
+      }
+
+      await assert.rejects(protection.reviewProduct(draft.id,{decision:'publish'},req),e=>e.getStatus()===403);
+      await http(`/api/admin/products/${draft.id}/review`,{decision:'publish'},adminToken,201);
+      await http(`/api/merchant/products/${draft.id}/edit`,{name:'Unauthorized edit',description:'Synthetic only'},stranger,400);
+      await http(`/api/merchant/products/${draft.id}/edit`,{name:'Synthetic revised product',description:'Synthetic revised description'},seller,201);
+      assert(!(await http('/api/products')).some(x=>x.id===draft.id));
+      await http(`/api/admin/products/${draft.id}/review`,{decision:'publish'},adminToken,201);
+      assert.equal((await http('/api/merchant/overview',undefined,seller)).products>=1,true);
+      // A failing audit insert must roll back content and publication atomically.
+      await pool.query("ALTER TABLE marketplace_audit ADD CONSTRAINT synthetic_audit_failure CHECK(action<>'product.edit') NOT VALID");
+      const sellerAccount=(await pool.query("SELECT id FROM accounts WHERE alias='demo_journey_merchant'")).rows[0].id;
+      await assert.rejects(protection.edit(draft.id,{name:'Must roll back',description:'Synthetic rollback'}, {principal:{id:sellerAccount,role:'merchant',merchant_id:a}}),e=>e.code==='23514');
+      const unchanged=(await pool.query('SELECT name,published FROM products WHERE id=$1',[draft.id])).rows[0];
+      assert.equal(unchanged.name,'Synthetic revised product');assert.equal(unchanged.published,true);
+      await pool.query('ALTER TABLE marketplace_audit DROP CONSTRAINT synthetic_audit_failure');
+
       assert((await http('/api/products')).some(x=>x.id===draft.id));
       const cart={items:[{productId:draft.id,quantity:1}],idempotencyKey:'journey-cart-key'};
       await http('/api/cart-checkout',{...cart,total_kobo:1},buyer,400);
@@ -221,6 +267,29 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
       await http('/api/cart-checkout',{items:[{productId:draft.id,quantity:1},{productId:missing,quantity:1}],idempotencyKey:'journey-rollback'},buyer,409);
       assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,1);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM demo_orders WHERE product_id=$1',[draft.id])).rows[0].n,2);
+      const {ProtectionController:Protection}=require('../dist/protection.controller');
+      const protectionApi=new Protection({pool});
+      await assert.rejects(protectionApi.open({orderId:oid,reason:'Missing item',evidence:'Synthetic note',refundRequested:true},otherReq),e=>e.getStatus()===400);
+      await http('/api/disputes',{orderId:oid,reason:'Missing item',evidence:'Synthetic note',refundRequested:true},otherBuyer,400);
+      await http(`/api/orders/${oid}`,undefined,stranger,400);
+      const disputeInput={orderId:oid,reason:'Missing item',evidence:'Synthetic note',refundRequested:true};
+      const attempts=await Promise.allSettled(Array.from({length:5},()=>protectionApi.open(disputeInput,req)));
+      assert.equal(attempts.filter(x=>x.status==='fulfilled').length,1);
+      assertSettledHttp(attempts.filter(x=>x.status==='rejected'),{409:4},'duplicate disputes');
+      const dispute=attempts.find(x=>x.status==='fulfilled').value;
+      assert.equal((await protectionApi.disputes(otherReq)).length,0);
+      await assert.rejects(protectionApi.respond(dispute.id,{response:'Synthetic response'},wrongMerchant),e=>e.getStatus()===400);
+      const sellerId=(await pool.query("SELECT id FROM accounts WHERE alias='demo_journey_merchant'")).rows[0].id;
+      await protectionApi.respond(dispute.id,{response:'Synthetic response'},{principal:{id:sellerId,role:'merchant',merchant_id:a}});
+      await http(`/api/disputes/${dispute.id}/resolve`,{status:'resolved',resolution:'Record only; no money movement'},seller,403);
+      await http(`/api/disputes/${dispute.id}/resolve`,{status:'resolved',resolution:'Record only; no money movement'},adminToken,201);
+      await assert.rejects(protectionApi.resolve(dispute.id,{status:'rejected',resolution:'Duplicate decision'},adminReq),e=>e.getStatus()===409);
+      assert((await protectionApi.audits(adminReq)).some(x=>x.action==='dispute.resolved'));
+      await protectionApi.reviewMerchant(a,{status:'suspended'},adminReq);
+      assert(!(await http('/api/products')).some(x=>x.id===draft.id));
+      await http('/api/cart-checkout',{items:[{productId:draft.id,quantity:1}],idempotencyKey:'suspended-checkout'},buyer,409);
+      await pool.query("UPDATE sessions SET mfa_verified_at=now()-interval '6 minutes' WHERE token_hash=$1",[tokenHash(adminToken)]);
+      await http('/api/admin/reviews',undefined,adminToken,401);
       await http('/api/auth/logout',{},buyer,201);
       await http('/api/orders',undefined,buyer,401);
     } finally {await app.close();}

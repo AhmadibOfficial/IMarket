@@ -16,8 +16,10 @@ export async function transaction<T>(pool: Pool, work: (client: PoolClient) => P
   } finally { client.release(); }
 }
 export async function reserve(client: PoolClient, productId: string, quantity: number) {
+  // Serialize suspension against new reservations, before locking inventory.
+  await client.query('SELECT m.id FROM merchants m JOIN products p ON p.merchant_id=m.id WHERE p.id=$1 FOR SHARE OF m', [productId]);
   const result = await client.query(`UPDATE products SET stock_demo=stock_demo-$2
-    WHERE id=$1 AND published AND stock_demo >= $2 RETURNING price_kobo`, [productId, quantity]);
+    WHERE id=$1 AND published AND (merchant_id IS NULL OR (moderation='approved' AND EXISTS (SELECT 1 FROM merchants m WHERE m.id=products.merchant_id AND m.status='approved'))) AND stock_demo >= $2 RETURNING price_kobo`, [productId, quantity]);
   if (!result.rowCount) throw new ConflictException('Product unavailable or insufficient demo inventory');
   return result.rows[0];
 }
@@ -51,5 +53,6 @@ export async function createOrderInTransaction(client: PoolClient, account: stri
     catch { throw new BadRequestException('Amount out of range'); }
     const result = await client.query(`INSERT INTO demo_orders(product_id,quantity,total_kobo,account_id,idempotency_key,lifecycle)
       VALUES($1,$2,$3,$4,$5,'reserved') RETURNING *`, [product,quantity,total,account,key]);
+    await client.query("INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,'order.create',$2)",[account,result.rows[0].id]);
     return result.rows[0];
 }

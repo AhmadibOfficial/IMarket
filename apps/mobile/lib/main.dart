@@ -39,6 +39,7 @@ class _StoreScreenState extends State<StoreScreen> {
   final password = TextEditingController();
   final Map<String,int> cart = {};
   List<dynamic> orders = [];
+  List<dynamic> disputes = [];
   @override
   void dispose() { alias.dispose(); password.dispose(); super.dispose(); }
   Future<dynamic> request(String path, [Map<String,dynamic>? body]) async {
@@ -56,7 +57,34 @@ class _StoreScreenState extends State<StoreScreen> {
   }
   Future<void> refreshOrders() async {
     final result = await request('/api/orders');
-    if(mounted) setState(() {orders=result as List;});
+    final protection = await request('/api/disputes');
+    if(mounted) setState(() {orders=result as List;disputes=protection as List;});
+  }
+  Future<void> openDispute(String orderId) async {
+    final reason=TextEditingController(), evidence=TextEditingController();
+    final formKey=GlobalKey<FormState>();
+    bool refund=false;
+    final payload=await showDialog<Map<String,dynamic>>(context:context,builder:(dialogContext)=>StatefulBuilder(builder:(context,update)=>AlertDialog(
+      title:const Text('Open a dispute'),
+      content:SingleChildScrollView(child:Form(key:formKey,child:Column(mainAxisSize:MainAxisSize.min,children:[
+        const Text('Synthetic text evidence only. Refund requests are records; no money moves.'),
+        TextFormField(controller:reason,maxLength:2000,decoration:const InputDecoration(labelText:'Reason'),validator:(v)=>(v??'').trim().length<3?'Enter at least 3 characters':null),
+        TextFormField(controller:evidence,maxLength:4000,maxLines:4,decoration:const InputDecoration(labelText:'Synthetic evidence'),validator:(v)=>(v??'').trim().length<3?'Enter at least 3 characters':null),
+        CheckboxListTile(value:refund,onChanged:(v)=>update(()=>refund=v??false),title:const Text('Request refund review (record only)')),
+      ]))),
+      actions:[TextButton(onPressed:()=>Navigator.pop(dialogContext),child:const Text('Cancel')),FilledButton(onPressed:(){if(formKey.currentState!.validate())Navigator.pop(dialogContext,{'orderId':orderId,'reason':reason.text,'evidence':evidence.text,'refundRequested':refund});},child:const Text('Submit'))],
+    )));
+    // Dialog controllers may still be read during the route closing animation.
+    await Future<void>.delayed(const Duration(milliseconds:300));
+    reason.dispose(); evidence.dispose();
+    if(payload!=null && mounted)await action(() async {await request('/api/disputes',payload);await refreshOrders();});
+  }
+  Future<void> orderDetails(String id) async {
+    await action(() async {
+      final detail=await request('/api/orders/$id');
+      if(!mounted)return;
+      await showDialog<void>(context:context,builder:(context)=>AlertDialog(title:Text(detail['name'].toString()),content:SingleChildScrollView(child:Text("${detail['description']}\n${detail['lifecycle']}\nCreated ${detail['created_at']}")),actions:[TextButton(onPressed:()=>Navigator.pop(context),child:const Text('Close'))]));
+    });
   }
   String note = 'This app is a local demo. No real purchases or payment plans.';
   @override
@@ -89,7 +117,7 @@ class _StoreScreenState extends State<StoreScreen> {
           setState(() {token=session['accessToken'];}); await refreshOrders();
         }),child:const Text('Log in')),
       ] else FilledButton(onPressed:busy?null:()=>action(() async {
-        try {await request('/api/auth/logout',{});} finally {if(mounted)setState(() {token='';orders=[];cart.clear();checkoutKey=null;});}
+        try {await request('/api/auth/logout',{});} finally {if(mounted)setState(() {token='';orders=[];disputes=[];cart.clear();checkoutKey=null;});}
       }),child:const Text('Log out')),
       Text('Cart: ${cart.values.fold<int>(0,(a,b)=>a+b)} items'),
       FilledButton(onPressed:busy||token.isEmpty||cart.isEmpty?null:()=>action(() async {
@@ -102,7 +130,8 @@ class _StoreScreenState extends State<StoreScreen> {
       if(checkoutKey!=null) const Text('Cart locked for retry after a failure. Review orders before changing checkout.'),
       if(checkoutKey==null && cart.isNotEmpty) TextButton(onPressed:busy?null:()=>setState(cart.clear),child:const Text('Clear cart')),
       if(token.isNotEmpty) TextButton(onPressed:busy?null:()=>action(refreshOrders),child:const Text('Refresh orders')),
-      ...orders.map((o)=>ListTile(title:Text('${o['name']} × ${o['quantity']}'),subtitle:Text('${o['lifecycle']} · ${o['id']}'),trailing:o['lifecycle']=='reserved'?TextButton(onPressed:busy?null:()=>action(() async {await request('/api/demo-orders/${o['id']}/cancel',{});await refreshOrders();await load();}),child:const Text('Cancel')):null)),
+      ...orders.map((o)=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[ListTile(onTap:busy?null:()=>orderDetails(o['id'].toString()),title:Text('${o['name']} × ${o['quantity']}'),subtitle:Text('${o['lifecycle']} · ${o['id']}'),trailing:o['lifecycle']=='reserved'?TextButton(onPressed:busy?null:()=>action(() async {await request('/api/demo-orders/${o['id']}/cancel',{});await refreshOrders();await load();}),child:const Text('Cancel')):null),TextButton(onPressed:busy||disputes.any((d)=>d['order_id']==o['id'])?null:()=>openDispute(o['id'].toString()),child:const Text('Open dispute'))])),
+      ...disputes.map((d)=>ListTile(title:Text('Dispute: ${d['status']}'),subtitle:Text('${d['reason']} · ${d['evidence']} · ${d['response'] ?? 'Awaiting merchant response'} · ${d['resolution'] ?? 'Awaiting review'}'))),
       const SizedBox(height:22),const Text('Featured products',style:TextStyle(fontSize:23,fontWeight:FontWeight.bold,color:navy)),
       Padding(padding:const EdgeInsets.symmetric(vertical:12),child:Text(note,style:const TextStyle(color:Color(0xff64758c),fontSize:12))),
       if(loading) const Center(child:Padding(padding:EdgeInsets.all(30),child:CircularProgressIndicator())),

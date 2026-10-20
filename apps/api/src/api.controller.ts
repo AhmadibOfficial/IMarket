@@ -24,13 +24,13 @@ export class ApiController {
   constructor(@Inject(DbService) private readonly db: DbService) {}
   @Get('health') health() {return { status:'ok', mode:'demo', realPayments:false, liveMarketplace:false };}
   @Get('api/products') async products() {
-    const r=await this.db.pool.query('SELECT id,slug,name,category,description,price_kobo,group_price_kobo,stock_demo FROM products WHERE published AND stock_demo > 0 ORDER BY name');
+    const r=await this.db.pool.query(`SELECT id,slug,name,category,description,price_kobo,group_price_kobo,stock_demo FROM products WHERE published AND (merchant_id IS NULL OR (moderation='approved' AND EXISTS (SELECT 1 FROM merchants m WHERE m.id=products.merchant_id AND m.status='approved'))) AND stock_demo > 0 ORDER BY name`);
     return r.rows.map(x=>({...x,price_kobo:presentMoney(x.price_kobo),group_price_kobo:presentMoney(x.group_price_kobo)}));
   }
   @Get('api/groups') async groups() {
     const r=await this.db.pool.query(`SELECT c.id,c.lifecycle,c.product_id,c.min_members,c.max_members,c.expires_at,p.name AS product_name,p.group_price_kobo,COUNT(m.id)::int AS members
        FROM campaigns c JOIN products p ON p.id=c.product_id LEFT JOIN campaign_members m ON m.campaign_id=c.id
-       GROUP BY c.id,p.name,p.group_price_kobo ORDER BY c.created_at DESC LIMIT 40`);
+       WHERE p.published AND (p.merchant_id IS NULL OR (p.moderation='approved' AND EXISTS (SELECT 1 FROM merchants owner WHERE owner.id=p.merchant_id AND owner.status='approved'))) GROUP BY c.id,p.name,p.group_price_kobo ORDER BY c.created_at DESC LIMIT 40`);
     return r.rows.map(x=>({...x,group_price_kobo:presentMoney(x.group_price_kobo),state:x.lifecycle !== 'open' ? x.lifecycle : groupState({members:x.members,minMembers:x.min_members,maxMembers:x.max_members,expiresAt:x.expires_at.toISOString()})}));
   }
   @Post('api/groups') async create(@Body() input: Record<string,unknown>, @Req() request: {principal: Principal}) {
@@ -106,6 +106,7 @@ export class ApiController {
       if(order.lifecycle === 'reserved') {
         await client.query('UPDATE products SET stock_demo=stock_demo+$2 WHERE id=$1',[order.product_id,order.quantity]);
         await client.query("UPDATE demo_orders SET lifecycle='cancelled' WHERE id=$1",[id]);
+        await client.query("INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,'order.cancel',$2)",[request.principal.id,id]);
       }
       return {id,lifecycle:'cancelled',paymentCaptured:false,fulfilmentCreated:false,mode:'SIMULATED_ONLY'};
     });
@@ -118,15 +119,23 @@ export class ApiController {
     for(const field of ['name','category','description']) if(typeof input[field] !== 'string' || !(input[field] as string).trim() || (input[field] as string).length > 500) throw new BadRequestException('Invalid product text');
     const price=safeInt(input.priceKobo),stock=safeInt(input.stock);
     if(price<1 || price>1000000000 || stock<0 || stock>1000000) throw new BadRequestException('Invalid price or stock');
-    return (await this.db.pool.query(`INSERT INTO products(slug,name,category,description,price_kobo,group_price_kobo,stock_demo,merchant_id,published)
+    return transaction(this.db.pool,async client=>{
+    const product=(await client.query(`INSERT INTO products(slug,name,category,description,price_kobo,group_price_kobo,stock_demo,merchant_id,published)
       VALUES($1,$2,$3,$4,$5,$5,$6,$7,false) RETURNING *`,[randomUUID(),input.name,input.category,input.description,price,stock,request.principal.merchant_id])).rows[0];
+    await client.query("INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,'product.create',$2)",[request.principal.id,product.id]);
+    return product;});
   }
   @Post('api/merchant/products/:id/publish') async publishProduct(@Param('id') id: string,@Body() input: Record<string,unknown>,@Req() request: {principal: Principal}) {
     uuid(id); objectInput(input,['published']);
     if(typeof input.published !== 'boolean') throw new BadRequestException('Expected published boolean');
-    const r=await this.db.pool.query('UPDATE products SET published=$3 WHERE id=$1 AND merchant_id=$2 RETURNING *',[id,request.principal.merchant_id,input.published]);
-    if(!r.rowCount) throw new BadRequestException('Product not found');
-    return r.rows[0];
+    // Only administrator review can publish; merchants can withdraw a listing.
+    if(input.published) throw new BadRequestException('Administrator review required');
+    return transaction(this.db.pool,async client=>{
+      const r=await client.query('UPDATE products SET published=false WHERE id=$1 AND merchant_id=$2 RETURNING *',[id,request.principal.merchant_id]);
+      if(!r.rowCount) throw new BadRequestException('Product not found');
+      await client.query("INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,'product.withdraw',$2)",[request.principal.id,id]);
+      return r.rows[0];
+    });
   }
   @Get('api/orders') async orders(@Req() request: {principal: Principal}) {
     const merchant=request.principal.role==='merchant';
@@ -143,6 +152,7 @@ export class ApiController {
       if(r.rows[0].lifecycle===input.lifecycle) return {id,lifecycle:input.lifecycle,mode:'SIMULATED_ONLY'};
       if(r.rows[0].lifecycle!==previous[input.lifecycle as string]) throw new ConflictException('Invalid order transition');
       await client.query('UPDATE demo_orders SET lifecycle=$2 WHERE id=$1',[id,input.lifecycle]);
+      await client.query('INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,$2,$3)',[request.principal.id,`order.${input.lifecycle}`,id]);
       return {id,lifecycle:input.lifecycle,mode:'SIMULATED_ONLY'};
     });
   }
