@@ -49,7 +49,7 @@
   {
     "id": "IMK-005",
     "title": "Merchant management and buyer protection",
-    "status": "in-progress",
+    "status": "verified",
     "acceptance": [
       "merchant onboarding review",
       "product moderation",
@@ -80,6 +80,23 @@
       "rollback and incident response",
       "signed release approval",
       "metrics and supplier verification"
+    ]
+  },
+  {
+    "id": "IMK-008",
+    "title": "Cross-platform social shopping experience",
+    "status": "planned",
+    "acceptance": [
+      "functional Flutter customer shopping",
+      "authenticated group purchasing",
+      "social group invitations",
+      "server-authoritative discounts",
+      "atomic stock reservations",
+      "simulated checkout and order history",
+      "buyer protection integration",
+      "accessible web and mobile interfaces",
+      "PostgreSQL and authorization tests",
+      "no live payments, lending or deployment"
     ]
   }
 ]
