@@ -185,11 +185,11 @@ export class ApiController {
   @Post('api/merchant/orders/:id/fulfill') async fulfill(@Param('id') id:string,@Body() input:Record<string,unknown>,@Req() request:{principal:Principal}) {
     uuid(id);objectInput(input,['lifecycle']);
     const previous:Record<string,string>={processing:'reserved',shipped:'processing',delivered:'shipped'};
-    if(typeof input.lifecycle!=='string' || !previous[input.lifecycle]) throw new BadRequestException('Invalid lifecycle');
+    if(typeof input.lifecycle!=='string' || !Object.hasOwn(previous,input.lifecycle)) throw new BadRequestException('Invalid lifecycle');
     return transaction(this.db.pool,async client=>{
       const r=await client.query('SELECT o.* FROM demo_orders o JOIN products p ON p.id=o.product_id WHERE o.id=$1 AND p.merchant_id=$2 FOR UPDATE OF o',[id,request.principal.merchant_id]);
       if(!r.rowCount) throw new BadRequestException('Order not found');
-      if(r.rows[0].lifecycle===input.lifecycle) return {id,lifecycle:input.lifecycle,mode:'SIMULATED_ONLY'};
+      if(r.rows[0].lifecycle===input.lifecycle || (await client.query('SELECT id FROM marketplace_audit WHERE subject_id=$1 AND action=$2 LIMIT 1',[id,`order.${input.lifecycle}`])).rowCount) return {id,lifecycle:r.rows[0].lifecycle,mode:'SIMULATED_ONLY'};
       if(r.rows[0].lifecycle!==previous[input.lifecycle as string]) throw new ConflictException('Invalid order transition');
       await client.query('UPDATE demo_orders SET lifecycle=$2 WHERE id=$1',[id,input.lifecycle]);
       await client.query('INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,$2,$3)',[request.principal.id,`order.${input.lifecycle}`,id]);

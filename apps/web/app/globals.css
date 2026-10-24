@@ -9,4 +9,5 @@ textarea { width:28rem; min-height:6rem; }
 button { min-height:44px; cursor:pointer; }
 :focus-visible { outline:3px solid #245af0; outline-offset:3px; }
 article { overflow-wrap:anywhere; margin-block:1rem; }
+section[aria-label="Private notifications"],section[aria-label="Tracked order"] { overflow-wrap:anywhere; }
 @media(max-width:600px){form,label{width:100%;}input,textarea,select{width:100%;}input[type=checkbox]{width:auto;}h1{font-size:2rem;}}

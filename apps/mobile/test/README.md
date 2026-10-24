@@ -46,3 +46,17 @@ Current analysis, runtime, APK and database evidence is recorded in
 [IMK008_VERIFICATION.md](../../../docs/IMK008_VERIFICATION.md); earlier counts
 and attempts above are historical. Runtime test loading is currently blocked by
 the sandbox's denied loopback bind, so no new runtime passes are claimed.
+
+## IMK-009 continuation — 2026-10-24
+
+All pre-existing tests are retained. The notification/timeline contract test now
+checks that a successful read remains visible as Read before closing the dialog.
+Two additional widget regressions check failed-read retry and the empty private
+notification center without a read mutation. The suite defines 24 test cases
+(including the existing parameterized invitation cases); the user's baseline of
+22 passing tests has not been reproduced in this restricted environment.
+
+`flutter analyze --no-pub` passes after the changes. `flutter test --no-pub`
+fails loading all three test files because loopback bind is denied; zero test
+bodies execute. No runtime pass is claimed. See the current
+[verification report](../../../docs/IMK009_VERIFICATION.md) for APK and CI evidence.

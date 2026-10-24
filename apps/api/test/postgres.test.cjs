@@ -21,7 +21,7 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     await admin.query(`CREATE SCHEMA ${schema}`);
     created=true;
     pool=new Pool({connectionString:process.env.IMARKET_TEST_DATABASE_URL,options:`-c search_path=${schema}`,max:12,connectionTimeoutMillis:2000});
-    for(let pass=0;pass<2;pass++) for(const file of ['001_init.sql','002_auth.sql','003_inventory.sql','004_shopping.sql','005_protection.sql','006_admin_mfa.sql']) await pool.query(readFileSync(`${__dirname}/../migrations/${file}`,'utf8'));
+    for(let pass=0;pass<2;pass++) for(const file of ['001_init.sql','002_auth.sql','003_inventory.sql','004_shopping.sql','005_protection.sql','006_admin_mfa.sql','007_order_intelligence.sql']) await pool.query(readFileSync(`${__dirname}/../migrations/${file}`,'utf8'));
     const tenants=await pool.query("INSERT INTO merchants(alias) VALUES('demo_tenant_a'),('demo_tenant_b') RETURNING id");
     const [a,b]=tenants.rows.map(x=>x.id);
     const product=(await pool.query('SELECT id FROM products LIMIT 1')).rows[0].id;
@@ -269,11 +269,44 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
       await http('/api/demo-orders/'+oid+'/cancel',{},otherBuyer,400);
       await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle:'processing'},stranger,400);
       await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle:'shipped'},seller,409);
-      for(const lifecycle of ['processing','shipped','delivered']) await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle},seller,201);
+      await pool.query("ALTER TABLE marketplace_audit ADD CONSTRAINT synthetic_fulfillment_failure CHECK(action<>'order.processing') NOT VALID");
+      await assert.rejects(api.fulfill(oid,{lifecycle:'processing'},{principal:{id:sellerAccount,role:'merchant',merchant_id:a}}),e=>e.code==='23514');
+      assert.equal((await pool.query('SELECT lifecycle FROM demo_orders WHERE id=$1',[oid])).rows[0].lifecycle,'reserved');
+      assert(!(await http('/api/notifications',undefined,buyer)).some(x=>x.order_id===oid && x.action==='order.processing'));
+      await pool.query('ALTER TABLE marketplace_audit DROP CONSTRAINT synthetic_fulfillment_failure');
+      await pool.query(`ALTER TABLE order_notifications ADD CONSTRAINT synthetic_notification_failure CHECK(order_id<>'${oid}'::uuid) NOT VALID`);
+      await assert.rejects(api.fulfill(oid,{lifecycle:'processing'},{principal:{id:sellerAccount,role:'merchant',merchant_id:a}}),e=>e.code==='23514');
+      assert.equal((await pool.query('SELECT lifecycle FROM demo_orders WHERE id=$1',[oid])).rows[0].lifecycle,'reserved');
+      assert.equal((await pool.query("SELECT count(*)::int AS n FROM marketplace_audit WHERE subject_id=$1 AND action='order.processing'",[oid])).rows[0].n,0);
+      await pool.query('ALTER TABLE order_notifications DROP CONSTRAINT synthetic_notification_failure');
+      for(const lifecycle of ['processing','shipped','delivered']) {
+        await Promise.all(Array.from({length:5},()=>http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle},seller,201)));
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM marketplace_audit WHERE subject_id=$1 AND action=$2',[oid,`order.${lifecycle}`])).rows[0].n,1);
+      }
+      const retry=await http('/api/merchant/orders/'+oid+'/fulfill',{lifecycle:'processing'},seller,201);
+      assert.equal(retry.lifecycle,'delivered','Delayed retries return current state without regressing');
+      await http('/api/orders/'+oid,undefined,otherBuyer,400);
+      await http('/api/orders/'+oid,undefined,stranger,400);
+      const detail=await http('/api/orders/'+oid,undefined,buyer);
+      assert.deepEqual(detail.timeline.filter(x=>['order.processing','order.shipped','order.delivered'].includes(x.action)).map(x=>x.action),['order.processing','order.shipped','order.delivered']);
+      const notices=(await http('/api/notifications',undefined,buyer)).filter(x=>x.order_id===oid);
+      assert.equal(notices.filter(x=>x.action==='order.processing').length,1);
+      for(const sql of ['UPDATE marketplace_audit SET action=action WHERE id=$1','DELETE FROM marketplace_audit WHERE id=$1']) {
+        await assert.rejects(pool.query(sql,[notices[0].id]),e=>e.code==='23514');
+      }
+      await assert.rejects(pool.query('TRUNCATE marketplace_audit CASCADE'),e=>e.code==='23514');
+      assert(!(await http('/api/notifications',undefined,otherBuyer)).some(x=>x.order_id===oid));
+      await http('/api/notifications',undefined,seller,403);
+      await http('/api/notifications/'+notices[0].id+'/read',{},otherBuyer,400);
+      const read=await http('/api/notifications/'+notices[0].id+'/read',{},buyer,201);
+      assert.equal((await http('/api/notifications/'+notices[0].id+'/read',{},buyer,201)).read_at,read.read_at);
       await http('/api/demo-orders/'+oid+'/cancel',{},buyer,409);
       assert.equal((await http('/api/orders',undefined,buyer)).find(x=>x.id===oid).lifecycle,'delivered');
       const cancellable=await http('/api/cart-checkout',{...cart,idempotencyKey:'journey-cancel-key'},buyer,201);
       await Promise.all(Array.from({length:4},()=>http('/api/demo-orders/'+cancellable.orderIds[0]+'/cancel',{},buyer,201)));
+      const cancelledId=cancellable.orderIds[0];
+      assert.equal((await http('/api/orders/'+cancelledId,undefined,buyer)).timeline.filter(x=>x.action==='order.cancelled').length,1);
+      assert.equal((await http('/api/notifications',undefined,buyer)).filter(x=>x.order_id===cancelledId&&x.action==='order.cancelled').length,1);
       assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,1);
       // Later cart failure rolls back all earlier reservations and orders.
       const missing='ffffffff-ffff-4fff-8fff-ffffffffffff';
@@ -290,12 +323,18 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
       assert.equal(attempts.filter(x=>x.status==='fulfilled').length,1);
       assertSettledHttp(attempts.filter(x=>x.status==='rejected'),{409:4},'duplicate disputes');
       const dispute=attempts.find(x=>x.status==='fulfilled').value;
+      assert((await http('/api/orders/'+oid,undefined,buyer)).timeline.some(x=>x.id && x.action==='dispute.open'));
+      assert((await http('/api/notifications',undefined,buyer)).some(x=>x.order_id===oid && x.action==='dispute.open'));
       assert.equal((await protectionApi.disputes(otherReq)).length,0);
       await assert.rejects(protectionApi.respond(dispute.id,{response:'Synthetic response'},wrongMerchant),e=>e.getStatus()===400);
       const sellerId=(await pool.query("SELECT id FROM accounts WHERE alias='demo_journey_merchant'")).rows[0].id;
       await protectionApi.respond(dispute.id,{response:'Synthetic response'},{principal:{id:sellerId,role:'merchant',merchant_id:a}});
       await http(`/api/disputes/${dispute.id}/resolve`,{status:'resolved',resolution:'Record only; no money movement'},seller,403);
       await http(`/api/disputes/${dispute.id}/resolve`,{status:'resolved',resolution:'Record only; no money movement'},adminToken,201);
+      for(const action of ['dispute.open','dispute.responded','dispute.resolved']) {
+        assert.equal((await http('/api/orders/'+oid,undefined,buyer)).timeline.filter(x=>x.action===action).length,1);
+        assert.equal((await http('/api/notifications',undefined,buyer)).filter(x=>x.order_id===oid&&x.action===action).length,1);
+      }
       await assert.rejects(protectionApi.resolve(dispute.id,{status:'rejected',resolution:'Duplicate decision'},adminReq),e=>e.getStatus()===409);
       assert((await protectionApi.audits(adminReq)).some(x=>x.action==='dispute.resolved'));
       // Social journey exercises the real guard, tenant scope and owned protection endpoints.

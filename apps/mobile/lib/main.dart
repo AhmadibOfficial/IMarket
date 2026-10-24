@@ -93,11 +93,95 @@ class _StoreScreenState extends State<StoreScreen> {
   }
   Future<void> orderDetails(String id) async {
     await action(() async {
-      final detail=await request('/api/orders/$id');
-      if(!mounted)return;
-      await showDialog<void>(context:context,builder:(context)=>AlertDialog(title:Text(detail['name'].toString()),content:SingleChildScrollView(child:Text("${detail['description']}\n${detail['lifecycle']}\nCreated ${detail['created_at']}")),actions:[TextButton(onPressed:()=>Navigator.pop(context),child:const Text('Close'))]));
+      final detail = await request('/api/orders/$id');
+      if (!mounted) return;
+      await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+                  title: Text(detail['name'].toString()),
+                  content: SingleChildScrollView(
+                      child: Text(
+                          "${detail['description']}\n${detail['lifecycle']}\nCreated ${detail['created_at']}\nSimulated order timeline\n${(detail['timeline'] as List? ?? []).isEmpty ? 'No recorded activity.' : (detail['timeline'] as List).map((e) => "${e['action']} · ${e['created_at']}").join('\n')}")),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Close'))
+                  ]));
     });
   }
+
+  Future<void> notifications() async {
+    await action(() async {
+      final items = await request('/api/notifications') as List;
+      if (!mounted) return;
+      var reading = false;
+      var error = '';
+      await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => StatefulBuilder(
+              builder: (context, update) => AlertDialog(
+                      title: const Text('Private in-app notifications'),
+                      content: SizedBox(
+                          width: 400,
+                          child: SingleChildScrollView(
+                              child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                if (items.isEmpty)
+                                  const Text('No recorded activity.'),
+                                if (reading)
+                                  const Text('Updating notification…'),
+                                if (error.isNotEmpty)
+                                  Text(error, semanticsLabel: error),
+                                ...items.map((e) => ListTile(
+                                    title: Text(
+                                        "${e['action']} · Order ${e['order_id']}"),
+                                    subtitle: Text("${e['created_at']}"),
+                                    trailing: e['read_at'] != null
+                                        ? const Text('Read')
+                                        : TextButton(
+                                            onPressed: reading
+                                                ? null
+                                                : () async {
+                                                    update(() {
+                                                      reading = true;
+                                                      error = '';
+                                                    });
+                                                    try {
+                                                      final result = await request(
+                                                          '/api/notifications/${e['id']}/read',
+                                                          {});
+                                                      if (dialogContext.mounted) {
+                                                        update(() {
+                                                          e['read_at'] =
+                                                              result['read_at'];
+                                                        });
+                                                      }
+                                                    } catch (_) {
+                                                      if (dialogContext.mounted) {
+                                                        update(() {
+                                                          error =
+                                                              'Unable to mark notification read. Please retry.';
+                                                        });
+                                                      }
+                                                    } finally {
+                                                      if (dialogContext.mounted) {
+                                                        update(() {
+                                                          reading = false;
+                                                        });
+                                                      }
+                                                    }
+                                                  },
+                                            child: const Text('Mark read')))),
+                              ]))),
+                      actions: [
+                        TextButton(
+                            onPressed: () => Navigator.pop(dialogContext),
+                            child: const Text('Close'))
+                      ])));
+    });
+  }
+
   String note = 'This app is a local demo. No real purchases or payment plans.';
   @override
   void initState() { super.initState(); client = widget.client ?? http.Client(); countdown=Timer.periodic(const Duration(seconds:1), (_) {if(mounted && groups.isNotEmpty)setState(() {});}); load(); }
@@ -167,6 +251,7 @@ class _StoreScreenState extends State<StoreScreen> {
       }),child:const Text('Simulate checkout / retry')),
       if(checkoutKey!=null) const Text('Cart locked for retry after a failure. Review orders before changing checkout.'),
       if(checkoutKey==null && cart.isNotEmpty) TextButton(onPressed:busy?null:()=>setState(cart.clear),child:const Text('Clear cart')),
+      if(token.isNotEmpty) TextButton(onPressed:busy?null:notifications,child:const Text('Private notifications')),
       if(token.isNotEmpty) TextButton(onPressed:busy?null:()=>action(refreshOrders),child:const Text('Refresh orders')),
       ...orders.map((o)=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
         ListTile(onTap:busy?null:()=>orderDetails(o['id'].toString()),title:Text('${o['name']} × ${o['quantity']}'),subtitle:Text('${o['lifecycle']} · ${o['id']}\nServer total: ${ngn(num.parse(o['total_kobo'].toString()))}')),

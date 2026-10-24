@@ -12,7 +12,7 @@ export class AuthGuard implements CanActivate {
     request.res?.setHeader('Cache-Control','no-store');
     request.principal=await this.auth.authenticate(request.headers.authorization);
     if (controller === 'ProtectionController') {
-      const roles: Record<string,string[]> = {overview:['merchant'],edit:['merchant'],orderDetail:['buyer','merchant'],application:['merchant'],apply:['merchant'],reviews:['admin'],reviewMerchant:['admin'],submit:['merchant'],reviewProduct:['admin'],stock:['merchant'],disputes:['buyer','merchant','admin'],open:['buyer'],respond:['merchant'],resolve:['admin'],audits:['admin']};
+      const roles: Record<string,string[]> = {notifications:['buyer'],readNotification:['buyer'],overview:['merchant'],edit:['merchant'],orderDetail:['buyer','merchant'],application:['merchant'],apply:['merchant'],reviews:['admin'],reviewMerchant:['admin'],submit:['merchant'],reviewProduct:['admin'],stock:['merchant'],disputes:['buyer','merchant','admin'],open:['buyer'],respond:['merchant'],resolve:['admin'],audits:['admin']};
       if (!roles[handler]?.includes(request.principal.role)||(request.principal.role==='merchant'&&!request.principal.merchant_id)) throw new ForbiddenException();
       await this.auth.limit(`mutation:${request.principal.id}`,120);
       return true;

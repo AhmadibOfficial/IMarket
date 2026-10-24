@@ -22,13 +22,28 @@ final order = {
   'total_kobo': '9001',
   'lifecycle': 'reserved',
   'description': 'Owned order details',
+  'timeline': [
+    {'id': 'event1', 'action': 'order.processing', 'created_at': '2026-01-02'}
+  ],
   'created_at': '2026-01-01'
 };
 
 class Api {
   final requests = <http.Request>[];
   List<dynamic> products = [product], orders = [], disputes = [];
-  int joinStatus = 200, checkoutStatus = 200, groupStatus = 200;
+  int joinStatus = 200,
+      checkoutStatus = 200,
+      groupStatus = 200,
+      readStatus = 200;
+  List<dynamic> notices = [
+    {
+      'id': 'event1',
+      'order_id': 'o1',
+      'action': 'order.processing',
+      'created_at': '2026-01-02',
+      'read_at': null
+    }
+  ];
   Map<String, dynamic> settlement = {'id': 'o1'};
   Completer<http.Response>? pending;
   http.Response reply(dynamic body, [int status = 200]) =>
@@ -55,6 +70,10 @@ class Api {
         return reply({'accessToken': 'synthetic-token'});
       case '/api/auth/logout':
         return reply({});
+      case '/api/notifications':
+        return reply(notices);
+      case '/api/notifications/event1/read':
+        return reply({'id': 'event1', 'read_at': '2026-01-03'}, readStatus);
       case '/api/orders':
         return reply(orders);
       case '/api/orders/o1':
@@ -180,6 +199,62 @@ Future<void> login(WidgetTester t) async {
 }
 
 void main() {
+  testWidgets(
+      'private notifications and owned timeline use authenticated requests',
+      (t) async {
+    final a = Api();
+    a.orders = [order];
+    await start(t, a);
+    expect(find.text('Private notifications'), findsNothing);
+    await login(t);
+    await tap(t, 'Private notifications');
+    expect(find.text('order.processing · Order o1'), findsOneWidget);
+    await tap(t, 'Mark read');
+    final read = a.requests
+        .lastWhere((r) => r.url.path == '/api/notifications/event1/read');
+    expect(read.method, 'POST');
+    expect(read.headers['authorization'], 'Bearer synthetic-token');
+    expect(find.text('Read'), findsOneWidget);
+    await tap(t, 'Close');
+    await tap(t, 'Demo rice × 1');
+    expect(
+        find.textContaining('order.processing · 2026-01-02'), findsOneWidget);
+    await tap(t, 'Close');
+    expect(t.takeException(), isNull);
+    await t.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+      'notification read failures retain unread activity and support retry',
+      (t) async {
+    final a = Api();
+    a.readStatus = 503;
+    await start(t, a);
+    await login(t);
+    await tap(t, 'Private notifications');
+    await tap(t, 'Mark read');
+    expect(find.text('Unable to mark notification read. Please retry.'),
+        findsOneWidget);
+    expect(find.text('Mark read'), findsOneWidget);
+    a.readStatus = 200;
+    await tap(t, 'Mark read');
+    expect(find.text('Read'), findsOneWidget);
+    expect(find.text('Mark read'), findsNothing);
+    await tap(t, 'Close');
+    expect(t.takeException(), isNull);
+  });
+  testWidgets('empty private notification center can close without a mutation',
+      (t) async {
+    final a = Api();
+    a.notices = [];
+    await start(t, a);
+    await login(t);
+    await tap(t, 'Private notifications');
+    expect(find.text('No recorded activity.'), findsOneWidget);
+    expect(find.text('Mark read'), findsNothing);
+    await tap(t, 'Close');
+    expect(a.requests.where((r) => r.url.path.endsWith('/read')), isEmpty);
+    expect(t.takeException(), isNull);
+  });
   testWidgets('startup lists inline details and guards anonymous mutations',
       (t) async {
     final a = Api();
