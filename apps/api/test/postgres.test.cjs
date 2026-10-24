@@ -28,7 +28,20 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
     await pool.query("UPDATE merchants SET status='approved'");
     await pool.query("UPDATE products SET merchant_id=$1,moderation='approved' WHERE id=$2",[a,product]);
     const api=new ApiController({pool});
+    const visible=(await api.products()).find(p=>p.id===product);
+    assert(visible,'Approved merchant product is discoverable');
+    assert((await api.products({q:visible.name,category:visible.category,minPriceKobo:String(visible.price_kobo),maxPriceKobo:String(visible.price_kobo)})).some(p=>p.id===product));
+    assert.equal((await api.products({q:"%' OR true --"})).length,0,'Search is literal and cannot inject SQL');
+    assert.equal((await api.products({category:'nonexistent-category'})).length,0);
+    await pool.query("UPDATE merchants SET status='suspended' WHERE id=$1",[a]);
+    assert(!(await api.products()).some(p=>p.id===product),'Suspended merchant is not discoverable');
+    await pool.query("UPDATE merchants SET status='approved' WHERE id=$1",[a]);
+
     const input={productId:product,minMembers:2,maxMembers:4,durationHours:1};
+    await pool.query('UPDATE products SET published=false WHERE id=$1',[product]);
+    await assert.rejects(api.create(input,{principal:{id:randomUUID(),role:'merchant',merchant_id:a}}),e=>e.getStatus()===400);
+    await pool.query('UPDATE products SET published=true WHERE id=$1',[product]);
+
     await assert.rejects(api.create(input,{principal:{id:randomUUID(),role:'merchant',merchant_id:b}}),e=>e.getStatus()===400);
     assert.equal((await pool.query('SELECT COUNT(*)::int AS n FROM campaigns')).rows[0].n,0);
     await api.create(input,{principal:{id:randomUUID(),role:'merchant',merchant_id:a}});
@@ -285,6 +298,50 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
       await http(`/api/disputes/${dispute.id}/resolve`,{status:'resolved',resolution:'Record only; no money movement'},adminToken,201);
       await assert.rejects(protectionApi.resolve(dispute.id,{status:'rejected',resolution:'Duplicate decision'},adminReq),e=>e.getStatus()===409);
       assert((await protectionApi.audits(adminReq)).some(x=>x.action==='dispute.resolved'));
+      // Social journey exercises the real guard, tenant scope and owned protection endpoints.
+      const groupInput={productId:draft.id,minMembers:2,maxMembers:4,durationHours:1};
+      await http('/api/groups',groupInput,null,401);
+      await http('/api/groups',groupInput,buyer,403);
+      await http('/api/groups',groupInput,stranger,400);
+      await http('/api/groups',{...groupInput,groupPriceKobo:1},seller,400);
+      await http('/api/groups',{...groupInput,minMembers:0},seller,400);
+      await pool.query('UPDATE products SET stock_demo=3,group_price_kobo=10000 WHERE id=$1',[draft.id]);
+      const socialGroup=await http('/api/groups',groupInput,seller,201);
+      const groupPath='/api/groups/'+socialGroup.id;
+      await http(groupPath+'/join',{demoAlias:'demo_social_http'},null,401);
+      await http(groupPath+'/join',{demoAlias:'demo_social_http'},seller,403);
+      await http(groupPath+'/join',{demoAlias:'bad alias'},buyer,400);
+      const duplicates=await Promise.all(Array.from({length:6},async()=>{
+        const r=await fetch(base+groupPath+'/join',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+buyer},body:JSON.stringify({demoAlias:'demo_social_http'})});
+        return r.status;
+      }));
+      assert.deepEqual(duplicates.sort(),[201,409,409,409,409,409]);
+      assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,2);
+      await http(groupPath+'/checkout',{},null,401);
+      await http(groupPath+'/checkout',{},seller,403);
+      await http(groupPath+'/checkout',{},otherBuyer,409);
+      await http(groupPath+'/checkout',{totalKobo:1},buyer,400);
+      assert.equal((await http(groupPath+'/checkout',{},buyer,201)).orderCreated,false);
+      await http(groupPath+'/join',{demoAlias:'demo_social_other'},otherBuyer,201);
+      await pool.query("UPDATE campaigns SET expires_at=now()-interval '1 second' WHERE id=$1",[socialGroup.id]);
+      await http(groupPath+'/join',{demoAlias:'demo_late_http'},buyer,409);
+      const socialOrders=await Promise.all(Array.from({length:6},()=>http(groupPath+'/checkout',{},buyer,201)));
+      const socialId=socialOrders[0].id;
+      assert(socialId);assert(socialOrders.every(o=>o.id===socialId&&Number(o.total_kobo)===10000&&o.paymentCaptured===false));
+      const secondOrder=await http(groupPath+'/checkout',{},otherBuyer,201);
+      assert.notEqual(secondOrder.id,socialId);
+      assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,1);
+      await http('/api/orders/'+socialId,undefined,otherBuyer,400);
+      await http('/api/orders/'+socialId,undefined,stranger,400);
+      assert(!(await http('/api/orders',undefined,otherBuyer)).some(o=>o.id===socialId));
+      await http('/api/demo-orders/'+socialId+'/cancel',{},otherBuyer,400);
+      const groupDispute={orderId:socialId,reason:'Synthetic group dispute',evidence:'Synthetic evidence only',refundRequested:true};
+      await http('/api/disputes',groupDispute,otherBuyer,400);
+      await http('/api/disputes',groupDispute,buyer,201);
+      assert((await http('/api/disputes',undefined,buyer)).some(d=>d.order_id===socialId));
+      await Promise.all(Array.from({length:4},()=>http('/api/demo-orders/'+socialId+'/cancel',{},buyer,201)));
+      assert.equal((await http(groupPath+'/checkout',{},buyer,201)).lifecycle,'cancelled');
+      assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[draft.id])).rows[0].stock_demo,2);
       await protectionApi.reviewMerchant(a,{status:'suspended'},adminReq);
       assert(!(await http('/api/products')).some(x=>x.id===draft.id));
       await http('/api/cart-checkout',{items:[{productId:draft.id,quantity:1}],idempotencyKey:'suspended-checkout'},buyer,409);
@@ -293,6 +350,26 @@ test('PostgreSQL migrations, tenant constraint, session expiry and atomic parall
       await http('/api/auth/logout',{},buyer,201);
       await http('/api/orders',undefined,buyer,401);
     } finally {await app.close();}
+    // IMK-008: confirmed membership transfers exactly one held item into an owned order.
+    await pool.query("UPDATE merchants SET status='approved' WHERE id=$1",[a]);
+    await pool.query("UPDATE products SET published=true,moderation='approved',stock_demo=10 WHERE id=$1",[product]);
+    const social=await api.create(input,{principal:{id:account,role:'merchant',merchant_id:a}});
+    await api.join(social.id,{demoAlias:'demo_social_one'},req);
+    await api.join(social.id,{demoAlias:'demo_social_two'},otherReq);
+    assert.equal((await api.groupCheckout(social.id,{},req)).orderCreated,false);
+    await assert.rejects(api.groupCheckout(social.id,{totalKobo:1},req),e=>e.getStatus()===400);
+    await assert.rejects(api.checkout({productId:product,quantity:1,idempotencyKey:'group_'+social.id},req),e=>e.getStatus()===400);
+    await assert.rejects(api.groupCheckout(social.id,{}, {principal:{id:randomUUID()}}),e=>e.getStatus()===409);
+    await pool.query("UPDATE campaigns SET expires_at=now()-interval '1 second' WHERE id=$1",[social.id]);
+    const held=(await pool.query('SELECT stock_demo,group_price_kobo FROM products WHERE id=$1',[product])).rows[0];
+    const groupOrders=await Promise.all(Array.from({length:8},()=>api.groupCheckout(social.id,{},req)));
+    assert.equal(new Set(groupOrders.map(o=>o.id)).size,1);
+    assert.equal(Number(groupOrders[0].total_kobo),Number(held.group_price_kobo));
+    assert.equal(groupOrders[0].paymentCaptured,false);
+    assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[product])).rows[0].stock_demo,held.stock_demo);
+    await api.cancelOrder(groupOrders[0].id,{},req);
+    assert.equal((await api.groupCheckout(social.id,{},req)).lifecycle,'cancelled');
+    assert.equal((await pool.query('SELECT stock_demo FROM products WHERE id=$1',[product])).rows[0].stock_demo,held.stock_demo+1);
     await constraint('UPDATE products SET stock_demo=-1 WHERE id=$1',[product],'23514');
   } finally {
     if(pool) await pool.end();

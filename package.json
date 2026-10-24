@@ -18,7 +18,8 @@
     "ci": "npm run validate:milestone",
     "next-task": "python3 scripts/next_task.py",
     "validate:milestone": "node scripts/validate-milestone.cjs",
-    "repair:milestone": "node scripts/repair-milestone.cjs"
+    "repair:milestone": "node scripts/repair-milestone.cjs",
+    "test:browser": "npm run build && node scripts/test-browser.cjs"
   },
   "engines": {
     "node": ">=22"

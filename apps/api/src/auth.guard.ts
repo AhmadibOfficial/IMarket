@@ -17,7 +17,7 @@ export class AuthGuard implements CanActivate {
       await this.auth.limit(`mutation:${request.principal.id}`,120);
       return true;
     }
-    const roles: Record<string,string>={create:'merchant',join:'buyer',checkout:'buyer',cartCheckout:'buyer',cancelGroup:'merchant',expireGroup:'merchant',cancelOrder:'buyer',merchantProducts:'merchant',createProduct:'merchant',publishProduct:'merchant',fulfill:'merchant'};
+    const roles: Record<string,string>={create:'merchant',join:'buyer',groupCheckout:'buyer',checkout:'buyer',cartCheckout:'buyer',cancelGroup:'merchant',expireGroup:'merchant',cancelOrder:'buyer',merchantProducts:'merchant',createProduct:'merchant',publishProduct:'merchant',fulfill:'merchant'};
     const role=controller === 'ApiController' ? roles[handler] : undefined;
     if(controller === 'ApiController' && handler === 'orders') {
       if(!['buyer','merchant'].includes(request.principal.role)) throw new ForbiddenException();

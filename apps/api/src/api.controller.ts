@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Controller, Get, HttpException, Inject, Param, Post, Body, Req } from '@nestjs/common';
+import { BadRequestException, ConflictException, Controller, Get, HttpException, Inject, Param, Post, Body, Req, Query } from '@nestjs/common';
 import { Principal, objectInput } from './auth.service';
 import { DbService } from './db.service';
 import { groupState, validateCampaign, validateDemoAlias } from '@imarket/commerce-domain';
@@ -23,8 +23,20 @@ function presentMoney(v: unknown): number {
 export class ApiController {
   constructor(@Inject(DbService) private readonly db: DbService) {}
   @Get('health') health() {return { status:'ok', mode:'demo', realPayments:false, liveMarketplace:false };}
-  @Get('api/products') async products() {
-    const r=await this.db.pool.query(`SELECT id,slug,name,category,description,price_kobo,group_price_kobo,stock_demo FROM products WHERE published AND (merchant_id IS NULL OR (moderation='approved' AND EXISTS (SELECT 1 FROM merchants m WHERE m.id=products.merchant_id AND m.status='approved'))) AND stock_demo > 0 ORDER BY name`);
+  @Get('api/products') async products(@Query() filters: Record<string,unknown> = {}) {
+    objectInput(filters,['q','category','minPriceKobo','maxPriceKobo']);
+    for(const field of ['q','category']) if(filters[field] !== undefined && (typeof filters[field] !== 'string' || (filters[field] as string).length > 100)) throw new BadRequestException('Invalid catalog filter');
+    const price=(field:string)=>{
+      const value=filters[field];
+      if(value===undefined || value==='') return null;
+      if(typeof value!=='string' || !/^\d{1,10}$/.test(value) || Number(value)>1000000000) throw new BadRequestException('Invalid price filter');
+      return Number(value);
+    };
+    const minimum=price('minPriceKobo'), maximum=price('maxPriceKobo');
+    if(minimum!==null && maximum!==null && minimum>maximum) throw new BadRequestException('Invalid price range');
+    // Literal substring search: wildcard characters never broaden the filter.
+    const values=[typeof filters.q==='string'?filters.q.trim():'',typeof filters.category==='string'?filters.category.trim():'',minimum,maximum];
+    const r=await this.db.pool.query(`SELECT id,slug,name,category,description,price_kobo,group_price_kobo,stock_demo FROM products WHERE published AND (merchant_id IS NULL OR (moderation='approved' AND EXISTS (SELECT 1 FROM merchants m WHERE m.id=products.merchant_id AND m.status='approved'))) AND stock_demo > 0 AND ($1='' OR strpos(lower(name || ' ' || description),lower($1))>0) AND ($2='' OR lower(category)=lower($2)) AND ($3::bigint IS NULL OR price_kobo >= $3) AND ($4::bigint IS NULL OR price_kobo <= $4) ORDER BY name,id`,values);
     return r.rows.map(x=>({...x,price_kobo:presentMoney(x.price_kobo),group_price_kobo:presentMoney(x.group_price_kobo)}));
   }
   @Get('api/groups') async groups() {
@@ -41,7 +53,7 @@ export class ApiController {
       const maxMembers=safeInt(input.maxMembers);
       const durationHours=safeInt(input.durationHours);
       validateCampaign({minMembers,maxMembers,durationHours});
-      const p=await this.db.pool.query('SELECT id FROM products WHERE id=$1 AND merchant_id=$2',[productId,request.principal.merchant_id]);
+      const p=await this.db.pool.query('SELECT id FROM products WHERE id=$1 AND merchant_id=$2 AND published AND moderation=\'approved\' AND EXISTS(SELECT 1 FROM merchants m WHERE m.id=products.merchant_id AND m.status=\'approved\')',[productId,request.principal.merchant_id]);
       if(!p.rowCount) throw new BadRequestException('Unknown demo product');
       const r=await this.db.pool.query(`INSERT INTO campaigns (product_id,min_members,max_members,expires_at,merchant_id)
           VALUES($1,$2,$3, now() + ($4 * interval '1 hour'),$5) RETURNING id,product_id,min_members,max_members,expires_at`,
@@ -73,6 +85,34 @@ export class ApiController {
     });
     if (!result) throw new ConflictException('Campaign closed');
     return result;
+  }
+  @Post('api/groups/:id/checkout') async groupCheckout(@Param('id') id: string, @Body() input: Record<string,unknown>, @Req() request: {principal: Principal}) {
+    id=uuid(id); objectInput(input,[]);
+    return transaction(this.db.pool,async client=>{
+      const found=await client.query('SELECT * FROM campaigns WHERE id=$1 FOR UPDATE',[id]);
+      if(!found.rowCount) throw new BadRequestException('Campaign not found');
+      const c=found.rows[0], account=request.principal.id, key='group_'+id;
+      const membership=await client.query('SELECT * FROM campaign_members WHERE campaign_id=$1 AND account_id=$2',[id,account]);
+      if(!membership.rowCount) throw new ConflictException('Group membership required');
+      const prior=await client.query('SELECT * FROM demo_orders WHERE account_id=$1 AND idempotency_key=$2',[account,key]);
+      if(prior.rowCount) return {...prior.rows[0],mode:'SIMULATED_ONLY',paymentCaptured:false};
+      if(c.lifecycle==='open' && (await client.query('SELECT clock_timestamp() >= $1 AS elapsed',[c.expires_at])).rows[0].elapsed) {
+        await finishGroup(client,c);
+        c.lifecycle=(await client.query('SELECT lifecycle FROM campaigns WHERE id=$1',[id])).rows[0].lifecycle;
+      }
+      if(c.lifecycle!=='confirmed' || !membership.rows[0].inventory_reserved) return {mode:'SIMULATED_ONLY',paymentCaptured:false,state:c.lifecycle,orderCreated:false};
+      // Transfer the existing reservation. Never reserve this member's item twice.
+      await client.query('SELECT m.id FROM merchants m JOIN products p ON p.merchant_id=m.id WHERE p.id=$1 FOR SHARE OF m',[c.product_id]);
+      const product=await client.query(`SELECT group_price_kobo FROM products WHERE id=$1 AND published AND
+        (merchant_id IS NULL OR (moderation='approved' AND EXISTS(SELECT 1 FROM merchants m WHERE m.id=products.merchant_id AND m.status='approved'))) FOR UPDATE`,[c.product_id]);
+      if(!product.rowCount) throw new ConflictException('Product unavailable');
+      const total=presentMoney(product.rows[0].group_price_kobo);
+      const order=(await client.query(`INSERT INTO demo_orders(product_id,quantity,total_kobo,account_id,idempotency_key,lifecycle)
+        VALUES($1,1,$2,$3,$4,'reserved') RETURNING *`,[c.product_id,total,account,key])).rows[0];
+      await client.query('UPDATE campaign_members SET inventory_reserved=false WHERE campaign_id=$1 AND account_id=$2',[id,account]);
+      await client.query("INSERT INTO marketplace_audit(actor_id,action,subject_id) VALUES($1,'order.group',$2)",[account,order.id]);
+      return {...order,mode:'SIMULATED_ONLY',paymentCaptured:false};
+    });
   }
   @Post('api/groups/:id/cancel') async cancelGroup(@Param('id') id: string, @Body() input: Record<string,unknown>, @Req() request: {principal: Principal}) {
     return this.transitionGroup(id,input,request,true);
@@ -183,7 +223,7 @@ export class ApiController {
     const quantity=safeInt(input.quantity);
     if(quantity < 1 || quantity > 10) throw new BadRequestException('Invalid quantity');
     const key=input.idempotencyKey;
-    if(typeof key !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(key)) throw new BadRequestException('Invalid idempotency key');
+    if(typeof key !== 'string' || key.startsWith('group_') || !/^[a-zA-Z0-9_-]{8,80}$/.test(key)) throw new BadRequestException('Invalid idempotency key');
     const order=await createOrder(this.db.pool,request.principal.id,productId,quantity,key);
     return {id:order.id,status:'SIMULATED_ONLY',lifecycle:order.lifecycle,total_kobo:presentMoney(order.total_kobo),currency:'NGN',paymentCaptured:false,fulfilmentCreated:false};
   }
