@@ -85,7 +85,7 @@
   {
     "id": "IMK-008",
     "title": "Cross-platform social shopping experience",
-    "status": "planned",
+    "status": "verified",
     "acceptance": [
       "functional Flutter customer shopping",
       "authenticated group purchasing",
@@ -97,6 +97,23 @@
       "accessible web and mobile interfaces",
       "PostgreSQL and authorization tests",
       "no live payments, lending or deployment"
+    ]
+  },
+  {
+    "id": "IMK-009",
+    "title": "Merchant fulfillment and customer order intelligence",
+    "status": "planned",
+    "acceptance": [
+      "merchant-owned simulated fulfillment workflow",
+      "server-enforced order state transitions",
+      "customer order timeline in Flutter and web",
+      "private in-app notifications",
+      "order and dispute audit integration",
+      "cross-tenant and ownership negative tests",
+      "idempotent fulfillment operations",
+      "PostgreSQL concurrency tests",
+      "Flutter and web automated verification",
+      "no real payments, shipping or deployment"
     ]
   }
 ]
