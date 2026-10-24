@@ -102,7 +102,7 @@
   {
     "id": "IMK-009",
     "title": "Merchant fulfillment and customer order intelligence",
-    "status": "planned",
+    "status": "verified",
     "acceptance": [
       "merchant-owned simulated fulfillment workflow",
       "server-enforced order state transitions",
@@ -114,6 +114,23 @@
       "PostgreSQL concurrency tests",
       "Flutter and web automated verification",
       "no real payments, shipping or deployment"
+    ]
+  },
+  {
+    "id": "IMK-010",
+    "title": "Marketplace intelligence and merchant analytics",
+    "status": "planned",
+    "acceptance": [
+      "merchant-owned simulated sales analytics",
+      "inventory monitoring and low-stock alerts",
+      "group purchasing performance analytics",
+      "privacy-preserving customer recommendations",
+      "admin operational reporting",
+      "server-authoritative metric calculations",
+      "cross-tenant authorization tests",
+      "PostgreSQL aggregation and concurrency tests",
+      "Flutter and browser regression tests",
+      "no real payments, credit or deployment"
     ]
   }
 ]

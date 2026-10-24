@@ -1,18 +1,18 @@
-# IMK-009: Merchant fulfillment and customer order intelligence
+# IMK-010: Marketplace intelligence and merchant analytics
 
 Status: planned
 
 ## Acceptance criteria
-- [ ] merchant-owned simulated fulfillment workflow
-- [ ] server-enforced order state transitions
-- [ ] customer order timeline in Flutter and web
-- [ ] private in-app notifications
-- [ ] order and dispute audit integration
-- [ ] cross-tenant and ownership negative tests
-- [ ] idempotent fulfillment operations
-- [ ] PostgreSQL concurrency tests
-- [ ] Flutter and web automated verification
-- [ ] no real payments, shipping or deployment
+- [ ] merchant-owned simulated sales analytics
+- [ ] inventory monitoring and low-stock alerts
+- [ ] group purchasing performance analytics
+- [ ] privacy-preserving customer recommendations
+- [ ] admin operational reporting
+- [ ] server-authoritative metric calculations
+- [ ] cross-tenant authorization tests
+- [ ] PostgreSQL aggregation and concurrency tests
+- [ ] Flutter and browser regression tests
+- [ ] no real payments, credit or deployment
 
 ## Engineering safety
 Read AGENTS.md and docs/RELEASE_GATES.md. Work on a feature branch, add negative tests, run CI. No unapproved real payments or deployment.
